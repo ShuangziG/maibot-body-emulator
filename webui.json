@@ -1,0 +1,135 @@
+{
+  "schema_version": 2,
+  "required_capabilities": [
+    "custom_pages",
+    "structured_arguments"
+  ],
+  "workspace_title": "麦麦身体",
+  "pages": [
+    {
+      "id": "now",
+      "title": "麦麦此刻的身体",
+      "description": "实时体征、体感、胃内容物与今日行为计数，可对麦麦做喝水/进食/运动干预",
+      "placement": "workspace",
+      "icon": "chart",
+      "mode": "custom",
+      "entry": "webui/now.html",
+      "layout": "document",
+      "queries": {
+        "now": {
+          "api": "webui_now",
+          "version": "1"
+        },
+        "history": {
+          "api": "webui_history",
+          "version": "1",
+          "parameters": {
+            "hours": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 72,
+              "required": false
+            }
+          }
+        },
+        "events": {
+          "api": "webui_events",
+          "version": "1",
+          "parameters": {
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 400,
+              "required": false
+            },
+            "kind": {
+              "type": "string",
+              "max_length": 32,
+              "required": false
+            }
+          }
+        }
+      },
+      "actions": {
+        "intervene": {
+          "api": "webui_intervene",
+          "version": "1",
+          "confirmation": "确认对麦麦的身体做这次干预？",
+          "parameters": {
+            "kind": {
+              "type": "string",
+              "choices": [
+                "drink",
+                "eat",
+                "snack",
+                "exercise_on",
+                "exercise_off"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "timeline",
+      "title": "体征时间线",
+      "description": "全天体征曲线、进食饮水事件流与采样回放",
+      "placement": "sidebar",
+      "icon": "list",
+      "mode": "custom",
+      "entry": "webui/timeline.html",
+      "layout": "document",
+      "queries": {
+        "history": {
+          "api": "webui_history",
+          "version": "1",
+          "parameters": {
+            "hours": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 72,
+              "required": false
+            }
+          }
+        },
+        "events": {
+          "api": "webui_events",
+          "version": "1",
+          "parameters": {
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 400,
+              "required": false
+            },
+            "kind": {
+              "type": "string",
+              "max_length": 32,
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "organs",
+      "title": "内脏与食物库",
+      "description": "82 个生理字段按器官分组，以及 23 项 FoodType 的成分表与三餐候选池",
+      "placement": "sidebar",
+      "icon": "database",
+      "mode": "custom",
+      "entry": "webui/organs.html",
+      "layout": "document",
+      "queries": {
+        "organs": {
+          "api": "webui_organs",
+          "version": "1"
+        },
+        "foods": {
+          "api": "webui_foods",
+          "version": "1"
+        }
+      }
+    }
+  ]
+}

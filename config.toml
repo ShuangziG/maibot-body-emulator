@@ -1,0 +1,42 @@
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[sim]
+dt = 10.0
+speed = 1.0
+follow_system_clock = true
+catch_up_max_hours = 8.0
+autosave_seconds = 30.0
+history_limit = 2200
+seed = 20261106
+
+[speech]
+proactive_enabled = false
+min_interval_minutes = 120.0
+
+[rescue]
+enabled = false
+threshold = 25.0
+critical_seconds = 600.0
+stay_hours = 6.0
+restore_health = 74.0
+silent_hours = 0.0
+
+[link]
+enabled = false
+sync_activity = true
+sync_meal = true
+inject_state = false
+sync_clock = false
+share_state = false
+interval_seconds = 60.0
+host_plugin_id = "maibot-community.mai-life"
+
+[feeding]
+enabled = false
+trust_private_only = false
+
+[excretion]
+show_urination = true
+show_stool = true

@@ -1,0 +1,16 @@
+# 本仓库所有文本文件一律 LF（源码、页面、文档），
+# 防止 Windows 上 core.autocrlf=true 时整树显示为"全部改动"
+* text=auto eol=lf
+
+*.py   text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.js   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+
+# 图片是二进制，别做换行转换
+*.png binary
+*.webp binary
+*.jpg binary

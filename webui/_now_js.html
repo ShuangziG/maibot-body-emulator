@@ -1,0 +1,383 @@
+<script>
+(function () {
+  'use strict';
+
+  var STATE = { now: null, history: null };
+
+  function $(id) { return document.getElementById(id); }
+  function txt(id, value) { var el = $(id); if (el) el.textContent = value; }
+
+  function showError(msg) {
+    var box = $('err');
+    if (!msg) { if (box) box.classList.remove('on'); return; }
+    if (box) box.classList.add('on');
+    txt('err-text', msg);
+  }
+
+  function num(v, digits) {
+    var n = Number(v);
+    if (!isFinite(n)) return '—';
+    return n.toFixed(digits);
+  }
+
+  function toneClass(tone) {
+    if (tone === 'warn') return 'tone-warn';
+    if (tone === 'crit') return 'tone-crit';
+    if (tone === 'good') return 'tone-good';
+    return '';
+  }
+
+  function renderClock(d) {
+    var c = d.clock || {};
+    txt('clock-time', c.time || '--:--');
+    txt('clock-phase', c.phase || '—');
+    txt('clock-day', '第 ' + (c.day || 1) + ' 天 · 健康 ' + num(c.health, 0) + '/100');
+    var alive = $('clock-alive');
+    if (alive) {
+      var h = d.hospital || {};
+      if (h.critical) {
+        alive.textContent = '生命体征不稳';
+        alive.style.color = 'var(--status-warn)';
+      } else if (h.in_hospital) {
+        alive.textContent = '住院中';
+        alive.style.color = 'var(--status-crit)';
+      } else {
+        alive.textContent = '运行中';
+        alive.style.color = '';
+      }
+    }
+    renderHospital(d);
+    renderLink(d);
+    txt('foot-dt', num(c.dt, 0));
+    txt('foot-speed', num(c.speed, 1));
+    var today = d.today || {};
+    txt('c-meals', today.meals || 0);
+    txt('c-drinks', today.drinks || 0);
+    txt('c-uri', today.urinations || 0);
+    txt('c-urine', num(today.urine_total_l, 2));
+  }
+
+  function renderLink(d) {
+    var box = $('linkbar');
+    if (!box) return;
+    var l = d.link || {};
+    box.className = 'lb-linkbar';
+    var dot = $('link-dot');
+    var text = $('link-text');
+    var meta = $('link-meta');
+    if (!l.enabled) {
+      text.textContent = '联动未开启 · 身体按自身时钟独立运行';
+      meta.textContent = '可在插件配置 [link] 里打开';
+      return;
+    }
+    if (!l.ok) {
+      box.className = 'lb-linkbar err';
+      text.textContent = '联动已开启，但取不到麦生活状态';
+      meta.textContent = (l.last_error || '麦生活可能没在运行').slice(0, 48);
+      return;
+    }
+    box.className = 'lb-linkbar on';
+    var bits = [];
+    if (l.sync_activity) {
+      bits.push('睡眠 ' + (typeof l.sleep === 'number' ? l.sleep.toFixed(2) : '未提供'));
+      bits.push('活动 ' + (l.activity ? l.activity.toFixed(2) : '0.00'));
+    }
+    if (l.sync_meal) bits.push(l.meals_external ? '三餐跟日程' : '三餐备用');
+    if (l.sync_clock && l.clock_offset) bits.push('时钟对齐 ' + (l.clock_offset > 0 ? '+' : '') + l.clock_offset.toFixed(2) + 'h');
+    if (l.inject_state) bits.push('状态注入');
+    if (l.share_state) bits.push('主动分享');
+    if (l.feeding) bits.push('可喂食');
+    text.textContent = '已联动麦生活 · ' + (l.summary || l.phase || '状态同步中');
+    meta.textContent = bits.join('　');
+  }
+
+  function renderHospital(d) {
+    var box = $('hospital');
+    if (!box) return;
+    var h = d.hospital || {};
+    if (!h.in_hospital && !h.critical) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    box.className = 'lb-hospital' + (h.critical && !h.in_hospital ? ' lb-hospital-warn' : '');
+
+    var title = $('hospital-title');
+    var sub = $('hospital-sub');
+    var meta = $('hospital-meta');
+
+    if (h.in_hospital) {
+      title.textContent = '正在医院接受急救';
+      sub.textContent = (h.reason || '生命体征全面恶化') +
+        '　·　还有约 ' + num(h.hours_left, 1) + ' 小时出院';
+    } else {
+      title.textContent = '生命体征不稳，正在观察';
+      sub.textContent = '已持续 ' + num(h.critical_seconds / 60, 0) +
+        ' 分钟，超过阈值将自动送医';
+    }
+
+    var bits = [];
+    if (h.visits) bits.push('累计住院 ' + h.visits + ' 次');
+    bits.push(h.rescue_enabled ? '急救已开启' : '急救已关闭');
+    if (h.silent_hours > 0) {
+      bits.push(h.silent
+        ? '静默中（' + num(h.silent_hours, 0) + ' 小时内不回消息）'
+        : '静默窗口 ' + num(h.silent_hours, 0) + ' 小时');
+    } else {
+      bits.push('不拦截消息');
+    }
+    meta.innerHTML = bits.map(function (b) {
+      return '<span class="lb-hospital-tag">' + b + '</span>';
+    }).join('');
+  }
+
+  function renderVitals(d) {
+    var box = $('vitals');
+    if (!box) return;
+    var items = (d.vitals || []).slice();
+    box.innerHTML = items.map(function (v) {
+      return '<div class="lb-vital ' + toneClass(v.tone) + '">' +
+        '<div class="lb-vital-label">' + v.label + '</div>' +
+        '<div class="lb-vital-value">' + num(v.value, v.value % 1 === 0 ? 0 : 1) +
+        '<span class="lb-vital-unit">' + v.unit + '</span></div>' +
+        '<div class="lb-vital-text">' + (v.text || '\u00a0') + '</div></div>';
+    }).join('');
+  }
+
+  function renderFeelings(d) {
+    var box = $('feelings');
+    if (!box) return;
+    box.innerHTML = (d.feelings || []).map(function (f) {
+      var pct = Math.max(0, Math.min(100, Number(f.value) || 0));
+      return '<div class="lb-feel-row">' +
+        '<span>' + f.label + '</span>' +
+        '<span class="lb-bar"><i style="width:' + pct + '%;background:' + toneColor(f) + '"></i></span>' +
+        '<span class="lb-feel-word">' + (f.text || '') + '</span></div>';
+    }).join('');
+  }
+
+  function toneColor(f) {
+    if (f.tone === 'warn') return 'var(--status-warn)';
+    if (f.tone === 'crit') return 'var(--status-crit)';
+    return 'var(--lb-primary)';
+  }
+
+  function renderGut(d) {
+    var g = d.gut || {};
+    txt('gut-ml', num(g.gastric_ml, 0));
+    txt('gut-phase', g.phase || '—');
+    var bar = $('gut-bar');
+    if (bar) bar.style.width = Math.max(0, Math.min(100, (Number(g.gastric_ml) || 0) / 1500 * 100)) + '%';
+    txt('gut-meal', g.last_meal_items || '还没吃过东西');
+    txt('gut-drink', g.last_drink_items || '还没喝过东西');
+    txt('gut-bac', num(g.bac, 3) + ' g/L' + (g.bac_text ? '（' + g.bac_text + '）' : ''));
+    txt('gut-caf', num(g.caffeine, 0) + ' mg');
+    var note = $('gut-note');
+    if (note) {
+      note.textContent = (Number(g.bac) > 0.1 || Number(g.caffeine) > 40)
+        ? '嗜好品通路：乙醇按零级消除 0.15 g/L·h，咖啡因半衰期 5 小时。'
+        : '';
+    }
+  }
+
+  function renderSpeech(d) {
+    var sp = d.speech || {};
+    txt('speech', sp.describe || '—');
+    txt('brief', sp.brief || '—');
+  }
+
+  var KIND_LABEL = { meal: '进食', drink: '饮水', urination: '排尿', stool: '排便', sleep_start: '入睡', sleep_end: '醒来', alert: '告警', sleep: '睡眠' };
+
+  function renderEvents(d) {
+    var ul = $('events');
+    if (!ul) return;
+    var items = d.events || [];
+    txt('ev-count', '内存中 ' + (d.events_total || items.length) + ' 条');
+    if (!items.length) {
+      ul.innerHTML = '<li><span class="lb-empty">暂无事件</span></li>';
+      return;
+    }
+    ul.innerHTML = items.map(function (e) {
+      return '<li><span class="lb-ev-time">' + (e.clock || '') + '</span>' +
+        '<span>' + esc(e.text || '') + '</span>' +
+        '<span class="lb-tag">' + (KIND_LABEL[e.kind] || e.kind || '') + '</span></li>';
+    }).join('');
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  var FONT = '11px system-ui, -apple-system, "Segoe UI", "Microsoft YaHei UI", sans-serif';
+
+  function drawChart(canvas, series, opts) {
+    if (!canvas || !series.length) return;
+    var ctx = canvas.getContext('2d');
+    var dpr = window.devicePixelRatio || 1;
+    var rect = canvas.getBoundingClientRect();
+    var w = Math.max(240, rect.width || 480);
+    var h = 130;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    var css = getComputedStyle(canvas);
+    var grid = css.getPropertyValue('--chart-grid').trim() || 'rgba(120,120,120,.18)';
+    var axis = css.getPropertyValue('--chart-axis').trim() || 'rgba(120,120,120,.45)';
+
+    var padL = 34, padR = 8, padT = 8, padB = 18;
+    var iw = w - padL - padR, ih = h - padT - padB;
+
+    var all = [];
+    series.forEach(function (s) { s.data.forEach(function (v) { if (isFinite(v)) all.push(v); }); });
+    if (!all.length) return;
+    var min = Math.min.apply(null, all), max = Math.max.apply(null, all);
+    if (opts && opts.zeroBase) min = Math.min(0, min);
+    if (max - min < 1e-6) { max = min + 1; }
+    var pad = (max - min) * 0.12;
+    min -= pad; max += pad;
+
+    ctx.strokeStyle = grid;
+    ctx.lineWidth = 1;
+    ctx.font = FONT;
+    ctx.fillStyle = axis;
+    for (var i = 0; i <= 3; i++) {
+      var y = padT + ih * i / 3;
+      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + iw, y); ctx.stroke();
+      var val = max - (max - min) * i / 3;
+      ctx.fillText(val.toFixed(opts && opts.tick === 2 ? 1 : 0), 2, y + 3.5);
+    }
+
+    series.forEach(function (s) {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = 1.8;
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      var n = s.data.length;
+      var started = false;
+      for (var k = 0; k < n; k++) {
+        var v = s.data[k];
+        if (!isFinite(v)) { started = false; continue; }
+        var px = padL + (n <= 1 ? iw / 2 : iw * k / (n - 1));
+        var py = padT + ih - ih * (v - min) / (max - min);
+        if (!started) { ctx.moveTo(px, py); started = true; } else { ctx.lineTo(px, py); }
+      }
+      ctx.stroke();
+    });
+
+    ctx.strokeStyle = axis;
+    ctx.beginPath(); ctx.moveTo(padL, padT + ih); ctx.lineTo(padL + iw, padT + ih); ctx.stroke();
+
+    var labels = (opts && opts.labels) || [];
+    if (labels.length) {
+      ctx.fillStyle = axis;
+      ctx.fillText(labels[0] || '', padL, h - 6);
+      var mid = labels[Math.floor(labels.length / 2)] || '';
+      var mw = ctx.measureText(mid).width;
+      ctx.fillText(mid, padL + iw / 2 - mw / 2, h - 6);
+      var last = labels[labels.length - 1] || '';
+      var lw = ctx.measureText(last).width;
+      ctx.fillText(last, padL + iw - lw, h - 6);
+    }
+  }
+
+  function renderCharts() {
+    var h = STATE.history || {};
+    var s = h.series || {};
+    var labels = h.labels || [];
+    drawChart($('chart-bp'), [
+      { data: s.hr || [], color: '#2a78d6' },
+      { data: s.sbp || [], color: '#eb6834' },
+      { data: s.dbp || [], color: '#1baf7a' }
+    ], { labels: labels, tick: 0 });
+    drawChart($('chart-meta'), [
+      { data: s.glucose || [], color: '#eda100' },
+      { data: s.temp || [], color: '#6250d6' }
+    ], { labels: labels, tick: 2 });
+  }
+
+  async function loadNow() {
+    try {
+      var res = await window.maibot.query('now', {});
+      if (res && res.success === false) { showError(res.error || 'now 返回失败'); return; }
+      STATE.now = res || {};
+      showError('');
+      renderClock(STATE.now);
+      renderVitals(STATE.now);
+      renderFeelings(STATE.now);
+      renderGut(STATE.now);
+      renderSpeech(STATE.now);
+      renderEvents(STATE.now);
+      txt('hdr-version', 'v' + (STATE.now.version || '?'));
+      txt('hdr-generated', (STATE.now.generated_at || '').replace('T', ' '));
+      var err = STATE.now.error;
+      txt('foot-error', err ? err : '无');
+      var on = (STATE.now.clock && STATE.now.clock);
+      var exOn = $('btn-ex-on'), exOff = $('btn-ex-off');
+      if (exOn && exOff) { exOn.disabled = false; exOff.disabled = false; }
+      void on;
+    } catch (e) {
+      showError('拉取身体状态失败：' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function loadHistory() {
+    try {
+      var res = await window.maibot.query('history', { hours: 12 });
+      if (res && res.success === false) { showError(res.error || 'history 返回失败'); return; }
+      STATE.history = res || {};
+      renderCharts();
+    } catch (e) {
+      showError('拉取体征曲线失败：' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function act(kind, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      var res = await window.maibot.action('intervene', { kind: kind });
+      if (res && res.success === false) { showError(res.error || '干预失败'); return; }
+      await loadNow();
+      await loadHistory();
+    } catch (e) {
+      showError('干预失败：' + (e && e.message ? e.message : e));
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function bindActions() {
+    document.querySelectorAll('[data-act]').forEach(function (btn) {
+      btn.addEventListener('click', function () { act(btn.getAttribute('data-act'), btn); });
+    });
+    var refresh = $('btn-refresh');
+    if (refresh) refresh.addEventListener('click', function () { loadNow(); loadHistory(); });
+    var tl = $('btn-timeline');
+    if (tl) tl.addEventListener('click', function () { window.maibot.navigate('timeline', {}); });
+    var og = $('btn-organs');
+    if (og) og.addEventListener('click', function () { window.maibot.navigate('organs', {}); });
+  }
+
+  function boot() {
+    bindActions();
+    loadNow();
+    loadHistory();
+    setInterval(loadNow, 15000);
+    setInterval(loadHistory, 60000);
+    window.addEventListener('maibot:context', function (ev) {
+      var ctx = ev && ev.detail ? ev.detail : null;
+      if (!ctx) return;
+      txt('hdr-theme', (ctx.theme === 'dark' ? '暗色' : '亮色'));
+      loadHistory();
+    });
+  }
+
+  window.maibot.ready.then(function (ctx) {
+    txt('hdr-theme', (ctx && ctx.theme === 'dark' ? '暗色' : '亮色'));
+    boot();
+  });
+})();
+</script>

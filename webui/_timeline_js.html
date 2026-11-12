@@ -1,0 +1,247 @@
+<script>
+(function () {
+  'use strict';
+
+  var STATE = { history: null, events: null, filter: '' };
+
+  function $(id) { return document.getElementById(id); }
+  function txt(id, v) { var el = $(id); if (el) el.textContent = v; }
+
+  function showError(msg) {
+    var box = $('err');
+    if (!msg) { if (box) box.classList.remove('on'); return; }
+    if (box) box.classList.add('on');
+    txt('err-text', msg);
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  function num(v, d) {
+    var n = Number(v);
+    return isFinite(n) ? n.toFixed(d) : '—';
+  }
+
+  var FONT = '11px system-ui, -apple-system, "Segoe UI", "Microsoft YaHei UI", sans-serif';
+
+  function drawChart(canvas, series, labels, tickDigits) {
+    if (!canvas) return;
+    var ctx = canvas.getContext('2d');
+    var dpr = window.devicePixelRatio || 1;
+    var rect = canvas.getBoundingClientRect();
+    var w = Math.max(240, rect.width || 480);
+    var h = 130;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    var css = getComputedStyle(canvas);
+    var grid = css.getPropertyValue('--chart-grid').trim() || 'rgba(120,120,120,.18)';
+    var axis = css.getPropertyValue('--chart-axis').trim() || 'rgba(120,120,120,.45)';
+
+    var padL = 36, padR = 8, padT = 8, padB = 18;
+    var iw = w - padL - padR, ih = h - padT - padB;
+
+    var all = [];
+    series.forEach(function (s) { (s.data || []).forEach(function (v) { if (isFinite(v)) all.push(v); }); });
+    if (!all.length) return;
+    var min = Math.min.apply(null, all), max = Math.max.apply(null, all);
+    if (max - min < 1e-6) max = min + 1;
+    var pad = (max - min) * 0.12;
+    min -= pad; max += pad;
+
+    ctx.strokeStyle = grid; ctx.lineWidth = 1; ctx.font = FONT; ctx.fillStyle = axis;
+    for (var i = 0; i <= 3; i++) {
+      var y = padT + ih * i / 3;
+      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + iw, y); ctx.stroke();
+      ctx.fillText((max - (max - min) * i / 3).toFixed(tickDigits), 2, y + 3.5);
+    }
+
+    series.forEach(function (s) {
+      var data = s.data || [];
+      ctx.strokeStyle = s.color; ctx.lineWidth = 1.8; ctx.lineJoin = 'round';
+      ctx.beginPath();
+      var n = data.length, started = false;
+      for (var k = 0; k < n; k++) {
+        var v = data[k];
+        if (!isFinite(v)) { started = false; continue; }
+        var px = padL + (n <= 1 ? iw / 2 : iw * k / (n - 1));
+        var py = padT + ih - ih * (v - min) / (max - min);
+        if (!started) { ctx.moveTo(px, py); started = true; } else { ctx.lineTo(px, py); }
+      }
+      ctx.stroke();
+    });
+
+    ctx.strokeStyle = axis;
+    ctx.beginPath(); ctx.moveTo(padL, padT + ih); ctx.lineTo(padL + iw, padT + ih); ctx.stroke();
+
+    if (labels && labels.length) {
+      ctx.fillStyle = axis;
+      ctx.fillText(labels[0] || '', padL, h - 6);
+      var mid = labels[Math.floor(labels.length / 2)] || '';
+      ctx.fillText(mid, padL + iw / 2 - ctx.measureText(mid).width / 2, h - 6);
+      var last = labels[labels.length - 1] || '';
+      ctx.fillText(last, padL + iw - ctx.measureText(last).width, h - 6);
+    }
+  }
+
+  function renderCharts() {
+    var h = STATE.history || {};
+    var s = h.series || {};
+    var labels = h.labels || [];
+    drawChart($('chart-bp'), [
+      { data: s.hr, color: '#2a78d6' },
+      { data: s.sbp, color: '#eb6834' },
+      { data: s.dbp, color: '#1baf7a' }
+    ], labels, 0);
+    drawChart($('chart-gut'), [
+      { data: s.glucose, color: '#eda100' },
+      { data: s.gastric, color: '#6250d6' }
+    ], labels, 1);
+    txt('replay-hint', '共 ' + (h.count || 0) + ' 个采样点，窗口 ' + (h.hours || 12) + ' 小时');
+  }
+
+  function renderCounts() {
+    var d = STATE.events || {};
+    var counts = d.counts || {};
+    var labels = { meal: '进食', drink: '饮水', urination: '排尿', stool: '排便', sleep_start: '入睡', sleep_end: '醒来', alert: '告警' };
+    var keys = Object.keys(counts);
+    if (!keys.length) keys = ['meal', 'drink', 'urination', 'stool', 'alert'];
+    var html = keys.map(function (k) {
+      return '<div class="lb-stat"><div class="lb-stat-label">' + (labels[k] || k) + '</div>' +
+        '<div class="lb-stat-value">' + (counts[k] || 0) + '</div></div>';
+    }).join('');
+    html += '<div class="lb-stat"><div class="lb-stat-label">事件总数</div>' +
+      '<div class="lb-stat-value">' + (d.total || 0) + '</div></div>';
+    var box = $('counts');
+    if (box) box.innerHTML = html;
+    txt('ev-total', '内存中 ' + (d.total || 0) + ' 条');
+  }
+
+  function renderFilters() {
+    var d = STATE.events || {};
+    var counts = d.counts || {};
+    var labels = { '': '全部', meal: '进食', drink: '饮水', urination: '排尿', stool: '排便', sleep_start: '入睡', sleep_end: '醒来', alert: '告警' };
+    var keys = [''].concat(Object.keys(counts));
+    var box = $('filters');
+    if (!box) return;
+    box.innerHTML = keys.map(function (k) {
+      var on = (k === STATE.filter) ? ' on' : '';
+      var label = labels[k] || k;
+      var n = k ? (counts[k] || 0) : (d.total || 0);
+      return '<button type="button" class="lb-chip' + on + '" data-kind="' + k + '">' + label + ' ' + n + '</button>';
+    }).join('');
+    box.querySelectorAll('[data-kind]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        STATE.filter = btn.getAttribute('data-kind') || '';
+        renderFilters();
+        loadEvents();
+      });
+    });
+  }
+
+  function renderEvents() {
+    var ul = $('events');
+    if (!ul) return;
+    var items = (STATE.events && STATE.events.items) || [];
+    if (!items.length) {
+      ul.innerHTML = '<li><span class="lb-empty">这个筛选下没有事件</span></li>';
+      return;
+    }
+    var labels = { meal: '进食', drink: '饮水', urination: '排尿', stool: '排便', sleep_start: '入睡', sleep_end: '醒来', alert: '告警' };
+    ul.innerHTML = items.map(function (e) {
+      return '<li><span class="lb-ev-time">' + esc(e.clock || '') + '</span>' +
+        '<span>' + esc(e.text || '') + '</span>' +
+        '<span class="lb-tag">第 ' + (e.day || 1) + ' 天 · ' + (labels[e.kind] || e.kind) + '</span></li>';
+    }).join('');
+  }
+
+  function renderReplay() {
+    var h = STATE.history || {};
+    var s = h.series || {};
+    var labels = h.labels || [];
+    var days = h.days || [];
+    var n = labels.length;
+    var tbody = $('replay-table') ? $('replay-table').querySelector('tbody') : null;
+    if (!tbody) return;
+    if (!n) { tbody.innerHTML = '<tr><td colspan="8"><span class="lb-empty">没有采样点</span></td></tr>'; return; }
+    var start = Math.max(0, n - 40);
+    var rows = [];
+    for (var i = n - 1; i >= start; i--) {
+      rows.push('<tr>' +
+        '<td>' + esc(labels[i] || '') + '</td>' +
+        '<td>' + (days[i] || 1) + '</td>' +
+        '<td>' + num((s.hr || [])[i], 0) + '</td>' +
+        '<td>' + num((s.sbp || [])[i], 0) + '/' + num((s.dbp || [])[i], 0) + '</td>' +
+        '<td>' + num((s.glucose || [])[i], 2) + '</td>' +
+        '<td>' + num((s.temp || [])[i], 2) + '</td>' +
+        '<td>' + num((s.energy || [])[i], 0) + '</td>' +
+        '<td>' + num((s.gastric || [])[i], 0) + '</td>' +
+        '</tr>');
+    }
+    tbody.innerHTML = rows.join('');
+    txt('replay-hint', '显示最近 ' + rows.length + ' 个采样点，最新在前');
+  }
+
+  async function loadHistory() {
+    var hours = Number(($('sel-hours') || {}).value || 12);
+    try {
+      var res = await window.maibot.query('history', { hours: hours });
+      if (res && res.success === false) { showError(res.error || 'history 失败'); return; }
+      STATE.history = res || {};
+      showError('');
+      renderCharts();
+      renderReplay();
+      txt('hdr-generated', new Date().toLocaleTimeString());
+    } catch (e) {
+      showError('曲线拉取失败：' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function loadEvents() {
+    try {
+      var args = { limit: 200 };
+      if (STATE.filter) args.kind = STATE.filter;
+      var res = await window.maibot.query('events', args);
+      if (res && res.success === false) { showError(res.error || 'events 失败'); return; }
+      STATE.events = res || {};
+      renderCounts();
+      renderFilters();
+      renderEvents();
+    } catch (e) {
+      showError('事件拉取失败：' + (e && e.message ? e.message : e));
+    }
+  }
+
+  function boot() {
+    var now = $('btn-now');
+    if (now) now.addEventListener('click', function () { window.maibot.navigate('now', {}); });
+    var og = $('btn-organs');
+    if (og) og.addEventListener('click', function () { window.maibot.navigate('organs', {}); });
+    var rf = $('btn-refresh');
+    if (rf) rf.addEventListener('click', function () { loadHistory(); loadEvents(); });
+    var sel = $('sel-hours');
+    if (sel) sel.addEventListener('change', function () { loadHistory(); });
+    loadHistory();
+    loadEvents();
+    setInterval(loadHistory, 60000);
+    window.addEventListener('maibot:context', function (ev) {
+      var ctx = ev && ev.detail;
+      if (!ctx) return;
+      txt('hdr-theme', ctx.theme === 'dark' ? '暗色' : '亮色');
+      renderCharts();
+    });
+    window.addEventListener('resize', function () { renderCharts(); });
+  }
+
+  window.maibot.ready.then(function (ctx) {
+    txt('hdr-theme', ctx && ctx.theme === 'dark' ? '暗色' : '亮色');
+    txt('hdr-version', '麦麦身体');
+    boot();
+  });
+})();
+</script>

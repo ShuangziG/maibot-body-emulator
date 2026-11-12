@@ -1,0 +1,22 @@
+# 运行时产物
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 存档与日志（每个部署实例自己的数据，不进仓库）
+body_state.json
+logs/
+*.log
+*.log.jsonl
+
+# 备份
+*.bak
+*.bak_*
+.backup_*/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

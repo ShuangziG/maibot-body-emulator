@@ -1,0 +1,121 @@
+<div class="maibot-page lb-root" id="lb-now-root">
+  <header class="lb-topbar">
+    <div class="lb-brand">
+      <div class="lb-brand-icon" aria-hidden="true">麦</div>
+      <div>
+        <h1 class="lb-brand-title">麦麦身体 · 此刻</h1>
+        <div class="lb-brand-sub">
+          <span id="hdr-version">版本加载中…</span><span>·</span>
+          <span id="hdr-generated">等待同步</span><span>·</span>
+          <span id="hdr-theme">自适应皮肤</span>
+        </div>
+      </div>
+    </div>
+    <div class="lb-actions">
+      <button type="button" class="lb-btn" id="btn-timeline">时间线 →</button>
+      <button type="button" class="lb-btn" id="btn-organs">内脏细则 →</button>
+      <button type="button" class="lb-btn lb-btn-primary" id="btn-refresh">刷新实况</button>
+    </div>
+  </header>
+
+  <div class="lb-err" id="err"><strong>数据异常：</strong><span id="err-text"></span></div>
+
+  <div class="lb-hospital" id="hospital" hidden>
+    <div class="lb-hospital-icon" aria-hidden="true">＋</div>
+    <div class="lb-hospital-body">
+      <div class="lb-hospital-title" id="hospital-title">正在医院接受急救</div>
+      <div class="lb-hospital-sub" id="hospital-sub">—</div>
+    </div>
+    <div class="lb-hospital-meta" id="hospital-meta"></div>
+  </div>
+
+  <div class="lb-linkbar" id="linkbar">
+    <span class="lb-linkbar-dot" id="link-dot"></span>
+    <span class="lb-linkbar-text" id="link-text">联动未开启 · 身体按自身时钟独立运行</span>
+    <span class="lb-linkbar-meta" id="link-meta"></span>
+  </div>
+
+  <div class="lb-grid lb-hero" style="margin-bottom:14px">
+    <section class="lb-card">
+      <div class="lb-card-hd"><h2>身体时钟</h2><span class="lb-card-sub" id="clock-phase">—</span></div>
+      <div class="lb-clock-row">
+        <div class="lb-clock" id="clock-time">--:--</div>
+        <div>
+          <div class="lb-pill"><span class="lb-alive"></span><span id="clock-alive">运行中</span></div>
+          <div style="font-size:11px;color:var(--lb-muted);margin-top:6px" id="clock-day">第 1 天</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:14px">
+        <div><div class="lb-vital-label">今日进食</div><div class="lb-vital-value" id="c-meals">0<span class="lb-vital-unit">次</span></div></div>
+        <div><div class="lb-vital-label">今日饮水</div><div class="lb-vital-value" id="c-drinks">0<span class="lb-vital-unit">次</span></div></div>
+        <div><div class="lb-vital-label">今日排尿</div><div class="lb-vital-value" id="c-uri">0<span class="lb-vital-unit">次</span></div></div>
+        <div><div class="lb-vital-label">累计尿量</div><div class="lb-vital-value" id="c-urine">0<span class="lb-vital-unit">L</span></div></div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+        <button type="button" class="lb-btn" data-act="drink">给她喝水</button>
+        <button type="button" class="lb-btn" data-act="eat">安排一餐</button>
+        <button type="button" class="lb-btn" data-act="exercise_on" id="btn-ex-on">开始运动</button>
+        <button type="button" class="lb-btn" data-act="exercise_off" id="btn-ex-off">停止运动</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="lb-vitals" id="vitals"></div>
+    </section>
+  </div>
+
+  <div class="lb-grid" style="grid-template-columns:1.4fr 1fr;margin-bottom:14px" id="mid-grid">
+    <section class="lb-card">
+      <div class="lb-card-hd"><h2>她自己会怎么说</h2><span class="lb-card-sub">由引擎直接生成的中文自述</span></div>
+      <div class="lb-speech" id="speech">—</div>
+      <div class="lb-mono" id="brief">—</div>
+    </section>
+    <section class="lb-card">
+      <div class="lb-card-hd"><h2>胃里的东西</h2><span class="lb-card-sub" id="gut-phase">—</span></div>
+      <div class="lb-gut-row"><span>胃内容物</span><b><span id="gut-ml">0</span> mL</b></div>
+      <div class="lb-meter"><i id="gut-bar" style="width:0%"></i></div>
+      <div class="lb-gut-row"><span>最近一餐</span><b id="gut-meal">—</b></div>
+      <div class="lb-gut-row"><span>最近饮品</span><b id="gut-drink">—</b></div>
+      <div class="lb-gut-row"><span>血乙醇</span><b id="gut-bac">0.00 g/L</b></div>
+      <div class="lb-gut-row"><span>咖啡因</span><b id="gut-caf">0 mg</b></div>
+      <div class="lb-card-sub" id="gut-note" style="margin-top:8px"></div>
+    </section>
+  </div>
+
+  <div class="lb-grid" style="grid-template-columns:1fr 1.6fr;margin-bottom:14px" id="low-grid">
+    <section class="lb-card">
+      <div class="lb-card-hd"><h2>体感</h2><span class="lb-card-sub">0–100</span></div>
+      <div class="lb-feel" id="feelings"></div>
+    </section>
+    <section class="lb-card">
+      <div class="lb-card-hd"><h2>最近发生的事</h2><span class="lb-card-sub" id="ev-count">—</span></div>
+      <ul class="lb-ev" id="events"><li><span class="lb-empty">暂无事件</span></li></ul>
+    </section>
+  </div>
+
+  <section class="lb-card">
+    <div class="lb-card-hd"><h2>近 12 小时体征</h2><span class="lb-card-sub">每 60 仿真秒一个采样点</span></div>
+    <div class="lb-charts">
+      <div>
+        <div class="lb-chart-legend">
+          <span><i class="lb-dot" style="background:var(--series-1)"></i>心率 bpm</span>
+          <span><i class="lb-dot" style="background:var(--series-2)"></i>收缩压 mmHg</span>
+          <span><i class="lb-dot" style="background:var(--series-3)"></i>舒张压 mmHg</span>
+        </div>
+        <canvas class="lb-canvas" id="chart-bp" height="260"></canvas>
+      </div>
+      <div>
+        <div class="lb-chart-legend">
+          <span><i class="lb-dot" style="background:var(--series-4)"></i>血糖 mmol/L</span>
+          <span><i class="lb-dot" style="background:var(--series-7)"></i>体温 ℃</span>
+        </div>
+        <canvas class="lb-canvas" id="chart-meta" height="260"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <div class="lb-foot">
+    仿真步长 <span id="foot-dt">10</span> 秒 · 时间流速 <span id="foot-speed">1.0</span>× · 步进异常：<span id="foot-error">无</span><br>
+    数据来自插件后台常驻的生理引擎，页面只读取内存快照，不触发仿真。
+  </div>
+</div>

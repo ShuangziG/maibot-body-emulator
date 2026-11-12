@@ -1,0 +1,44 @@
+<div class="maibot-page lb-root" id="lb-organs-root">
+  <header class="lb-topbar">
+    <div class="lb-brand">
+      <div class="lb-brand-icon" aria-hidden="true">麦</div>
+      <div>
+        <h1 class="lb-brand-title">麦麦身体 · 内脏细则</h1>
+        <div class="lb-brand-sub">
+          <span id="hdr-fields">字段加载中…</span><span>·</span>
+          <span id="hdr-clock">—</span><span>·</span>
+          <span id="hdr-theme">自适应皮肤</span>
+        </div>
+      </div>
+    </div>
+    <div class="lb-actions">
+      <button type="button" class="lb-btn" id="btn-now">← 此刻</button>
+      <button type="button" class="lb-btn" id="btn-timeline">时间线 →</button>
+      <button type="button" class="lb-btn lb-btn-primary" id="btn-refresh">刷新</button>
+    </div>
+  </header>
+
+  <div class="lb-err" id="err"><strong>数据异常：</strong><span id="err-text"></span></div>
+
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px" id="tabs"></div>
+  <div class="lb-grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));margin-bottom:14px" id="groups"></div>
+
+  <section class="lb-card">
+    <div class="lb-card-hd"><h2>食物库</h2><span class="lb-card-sub" id="food-count">—</span></div>
+    <div style="overflow:auto">
+      <table class="lb-table" id="food-table">
+        <thead><tr><th>名称</th><th>分组</th><th>份量</th><th>体积 mL</th><th>热量 kcal</th><th>碳水 g</th><th>蛋白 g</th><th>脂肪 g</th><th>钠 mmol</th><th>酒精 g</th><th>咖啡因 mg</th></tr></thead>
+        <tbody><tr><td colspan="11"><span class="lb-empty">—</span></td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="lb-card" style="margin-top:14px">
+    <div class="lb-card-hd"><h2>三餐候选池</h2><span class="lb-card-sub">引擎按固定随机种子从池里选材</span></div>
+    <div id="pools" style="display:grid;gap:12px"></div>
+  </section>
+
+  <div class="lb-foot">
+    字段释义与 APK 依据见插件目录下的 README；本页只读，不做仿真推进。
+  </div>
+</div>

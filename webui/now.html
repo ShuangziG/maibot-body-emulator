@@ -1,0 +1,593 @@
+<style>
+  .lb-root{--lb-bg:var(--maibot-background,#f9f9f7);--lb-surface:var(--maibot-surface,#fcfcfb);--lb-fg:var(--maibot-foreground,#0b0b0b);--lb-muted:var(--maibot-muted,#6e6d68);--lb-soft:var(--maibot-soft,#f1f0ec);--lb-border:var(--maibot-border,rgba(11,11,11,.10));--lb-primary:var(--maibot-primary,#2a78d6);--lb-primary-fg:var(--maibot-primary-foreground,#fff);--lb-danger:var(--maibot-danger,#d03b3b);--lb-radius:var(--maibot-radius,12px);--lb-font-body:var(--maibot-font-body,system-ui,-apple-system,"Segoe UI","Microsoft YaHei UI",sans-serif);--lb-font-mono:var(--maibot-font-mono,ui-monospace,"JetBrains Mono",Consolas,monospace);--series-1:#2a78d6;--series-2:#eb6834;--series-3:#1baf7a;--series-4:#eda100;--series-7:#6250d6;--status-good:#0ca30c;--status-good-ink:#006300;--status-warn:#fab219;--status-crit:#d03b3b;--chart-grid:#e1e0d9;--chart-axis:#c3c2b7;font-family:var(--lb-font-body);color:var(--lb-fg);background:var(--lb-bg);padding:20px 24px 40px;max-width:1440px;margin:0 auto;box-sizing:border-box}
+  :root.dark .lb-root,html.dark .lb-root{--lb-bg:var(--maibot-background,#0d0d0d);--lb-surface:var(--maibot-surface,#1a1a19);--lb-fg:var(--maibot-foreground,#f0efec);--lb-muted:var(--maibot-muted,#9a9890);--lb-soft:var(--maibot-soft,#252523);--lb-border:var(--maibot-border,rgba(255,255,255,.10));--series-1:#3987e5;--series-2:#d95926;--series-3:#199e70;--series-4:#c98500;--series-7:#9085e9;--status-good-ink:#0ca30c;--chart-grid:#2c2c2a;--chart-axis:#383835}
+  html,body{margin:0;padding:0;background:var(--maibot-background,#f9f9f7)}
+  html.dark body,:root.dark body{background:var(--maibot-background,#0d0d0d)}
+  .lb-root *{box-sizing:border-box}
+  .lb-topbar{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--lb-border);flex-wrap:wrap}
+  .lb-brand{display:flex;gap:12px;align-items:center}
+  .lb-brand-icon{width:38px;height:38px;border-radius:10px;background:var(--lb-primary);color:var(--lb-primary-fg);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+  .lb-brand-title{margin:0;font-size:20px;font-weight:700;letter-spacing:-.01em;color:var(--lb-fg)}
+  .lb-brand-sub{font-size:12px;color:var(--lb-muted);display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+  .lb-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .lb-btn{padding:7px 13px;border-radius:var(--lb-radius);border:1px solid var(--lb-border);background:var(--lb-surface);color:var(--lb-fg);font-size:13px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:.15s;font-family:inherit}
+  .lb-btn:hover{background:var(--lb-soft)}
+  .lb-btn:disabled{opacity:.45;cursor:not-allowed}
+  .lb-btn-primary{background:var(--lb-primary);color:var(--lb-primary-fg);border-color:transparent}
+  .lb-btn-primary:hover{filter:brightness(1.08);background:var(--lb-primary)}
+  .lb-err{display:none;margin-bottom:16px;padding:10px 14px;border-radius:var(--lb-radius);border:1px solid var(--status-crit);background:color-mix(in srgb,var(--status-crit) 10%,transparent);font-size:13px}
+  .lb-err.on{display:block}
+  .lb-grid{display:grid;gap:14px}
+  .lb-hero{grid-template-columns:1.1fr 2fr}
+  @media(max-width:900px){.lb-hero{grid-template-columns:1fr}}
+  .lb-card{background:var(--lb-surface);border:1px solid var(--lb-border);border-radius:var(--lb-radius);padding:16px 18px}
+  .lb-card-hd{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:12px}
+  .lb-card-hd h2{margin:0;font-size:14px;font-weight:600;letter-spacing:.01em}
+  .lb-card-sub{font-size:12px;color:var(--lb-muted);font-weight:400}
+  .lb-clock{font-family:var(--lb-font-mono);font-size:44px;font-weight:600;line-height:1;letter-spacing:-.02em}
+  .lb-clock-row{display:flex;align-items:baseline;gap:10px;margin-bottom:6px}
+  .lb-pill{font-size:11px;padding:2px 8px;border-radius:999px;background:var(--lb-soft);color:var(--lb-muted);font-weight:500}
+  .lb-alive{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--status-good);margin-right:6px;box-shadow:0 0 0 3px color-mix(in srgb,var(--status-good) 18%,transparent)}
+  .lb-vitals{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px}
+  .lb-vital{background:var(--lb-surface);border:1px solid var(--lb-border);border-radius:var(--lb-radius);padding:12px 14px;position:relative;overflow:hidden}
+  .lb-vital::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--tone,transparent)}
+  .lb-vital-label{font-size:12px;color:var(--lb-muted);margin-bottom:6px}
+  .lb-vital-value{font-family:var(--lb-font-mono);font-size:24px;font-weight:600;line-height:1.1}
+  .lb-vital-unit{font-size:11px;color:var(--lb-muted);margin-left:3px;font-family:var(--lb-font-body)}
+  .lb-vital-text{font-size:11px;margin-top:6px;color:var(--tone,var(--lb-muted))}
+  .tone-good{--tone:var(--status-good)}
+  .tone-warn{--tone:var(--status-warn)}
+  .tone-crit{--tone:var(--status-crit)}
+  .lb-feel{display:flex;flex-direction:column;gap:9px}
+  .lb-feel-row{display:grid;grid-template-columns:52px 1fr 96px;gap:10px;align-items:center;font-size:12px}
+  .lb-bar{height:6px;border-radius:999px;background:var(--lb-soft);overflow:hidden}
+  .lb-bar i{display:block;height:100%;border-radius:999px;background:var(--lb-primary);transition:width .4s}
+  .lb-feel-word{color:var(--lb-muted);text-align:right;font-size:11px}
+  .lb-speech{font-size:14px;line-height:1.85;white-space:pre-wrap}
+  .lb-mono{font-family:var(--lb-font-mono);font-size:12px;color:var(--lb-muted);background:var(--lb-soft);padding:6px 10px;border-radius:8px;display:inline-block;margin-top:10px;word-break:break-all}
+  .lb-gut-row{display:flex;justify-content:space-between;font-size:12px;color:var(--lb-muted);margin:10px 0 6px}
+  .lb-gut-row b{color:var(--lb-fg);font-weight:600}
+  .lb-meter{height:8px;border-radius:999px;background:var(--lb-soft);overflow:hidden;margin-bottom:4px}
+  .lb-meter i{display:block;height:100%;border-radius:999px;background:var(--series-3)}
+  .lb-ev{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:0}
+  .lb-ev li{display:grid;grid-template-columns:56px 1fr auto;gap:10px;align-items:baseline;padding:7px 0;border-bottom:1px dashed var(--lb-border);font-size:12px}
+  .lb-ev li:last-child{border-bottom:none}
+  .lb-ev-time{font-family:var(--lb-font-mono);color:var(--lb-muted);font-size:11px}
+  .lb-tag{font-size:10px;padding:1px 7px;border-radius:999px;background:var(--lb-soft);color:var(--lb-muted);white-space:nowrap}
+  .lb-charts{display:grid;grid-template-columns:1fr;gap:14px}
+  @media(min-width:900px){.lb-charts{grid-template-columns:1fr 1fr}}
+  .lb-chart-legend{display:flex;gap:12px;font-size:11px;color:var(--lb-muted);margin-bottom:6px;flex-wrap:wrap}
+  .lb-chart-legend span{display:inline-flex;align-items:center;gap:5px}
+  .lb-dot{width:8px;height:8px;border-radius:2px;display:inline-block}
+  canvas.lb-canvas{width:100%;height:130px;display:block}
+  .lb-empty{font-size:12px;color:var(--lb-muted);padding:16px 0;text-align:center}
+  .lb-foot{margin-top:18px;font-size:11px;color:var(--lb-muted);line-height:1.7}
+  /* 急救 / 住院横幅 */
+  .lb-hospital{display:flex;align-items:center;gap:14px;margin-bottom:14px;padding:14px 18px;border-radius:12px;
+    background:linear-gradient(90deg,rgba(214,69,69,.12),rgba(214,69,69,.04));
+    border:1px solid rgba(214,69,69,.38)}
+  .lb-hospital[hidden]{display:none}
+  .lb-hospital-warn{background:linear-gradient(90deg,rgba(214,150,40,.12),rgba(214,150,40,.04));
+    border-color:rgba(214,150,40,.38)}
+  .lb-hospital-icon{width:34px;height:34px;flex:0 0 34px;border-radius:50%;display:grid;place-items:center;
+    background:rgba(214,69,69,.16);color:#d64545;font-size:17px;font-weight:700}
+  .lb-hospital-warn .lb-hospital-icon{background:rgba(214,150,40,.16);color:#c98a1e}
+  .lb-hospital-body{flex:1;min-width:0}
+  .lb-hospital-title{font-size:14px;font-weight:600;color:var(--lb-fg)}
+  .lb-hospital-sub{font-size:12px;color:var(--lb-muted);margin-top:4px;line-height:1.6}
+  .lb-hospital-meta{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+  .lb-hospital-tag{font-size:11px;padding:3px 9px;border-radius:999px;background:var(--lb-soft);
+    color:var(--lb-muted);white-space:nowrap}
+  .lb-linkbar{display:flex;align-items:center;gap:10px;margin-bottom:14px;padding:9px 14px;border-radius:10px;
+    background:var(--lb-soft);border:1px solid var(--lb-line);font-size:12px;color:var(--lb-muted)}
+  .lb-linkbar-dot{width:8px;height:8px;flex:0 0 8px;border-radius:50%;background:var(--lb-muted)}
+  .lb-linkbar.on .lb-linkbar-dot{background:var(--status-good)}
+  .lb-linkbar.err .lb-linkbar-dot{background:var(--status-crit)}
+  .lb-linkbar-text{flex:1;min-width:0;color:var(--lb-fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lb-linkbar-meta{font-size:11px;white-space:nowrap}
+  @media(max-width:720px){.lb-hospital-meta{width:100%;justify-content:flex-start}}
+</style>
+<div class="maibot-page lb-root" id="lb-now-root">
+  <header class="lb-topbar">
+    <div class="lb-brand">
+      <div class="lb-brand-icon" aria-hidden="true">麦</div>
+      <div>
+        <h1 class="lb-brand-title">麦麦身体 · 此刻</h1>
+        <div class="lb-brand-sub">
+          <span id="hdr-version">版本加载中…</span><span>·</span>
+          <span id="hdr-generated">等待同步</span><span>·</span>
+          <span id="hdr-theme">自适应皮肤</span>
+        </div>
+      </div>
+    </div>
+    <div class="lb-actions">
+      <button type="button" class="lb-btn" id="btn-timeline">时间线 →</button>
+      <button type="button" class="lb-btn" id="btn-organs">内脏细则 →</button>
+      <button type="button" class="lb-btn lb-btn-primary" id="btn-refresh">刷新实况</button>
+    </div>
+  </header>
+
+  <div class="lb-err" id="err"><strong>数据异常：</strong><span id="err-text"></span></div>
+
+  <div class="lb-hospital" id="hospital" hidden>
+    <div class="lb-hospital-icon" aria-hidden="true">＋</div>
+    <div class="lb-hospital-body">
+      <div class="lb-hospital-title" id="hospital-title">正在医院接受急救</div>
+      <div class="lb-hospital-sub" id="hospital-sub">—</div>
+    </div>
+    <div class="lb-hospital-meta" id="hospital-meta"></div>
+  </div>
+
+  <div class="lb-linkbar" id="linkbar">
+    <span class="lb-linkbar-dot" id="link-dot"></span>
+    <span class="lb-linkbar-text" id="link-text">联动未开启 · 身体按自身时钟独立运行</span>
+    <span class="lb-linkbar-meta" id="link-meta"></span>
+  </div>
+
+  <div class="lb-grid lb-hero" style="margin-bottom:14px">
+    <section class="lb-card">
+      <div class="lb-card-hd"><h2>身体时钟</h2><span class="lb-card-sub" id="clock-phase">—</span></div>
+      <div class="lb-clock-row">
+        <div class="lb-clock" id="clock-time">--:--</div>
+        <div>
+          <div class="lb-pill"><span class="lb-alive"></span><span id="clock-alive">运行中</span></div>
+          <div style="font-size:11px;color:var(--lb-muted);margin-top:6px" id="clock-day">第 1 天</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:14px">
+        <div><div class="lb-vital-label">今日进食</div><div class="lb-vital-value" id="c-meals">0<span class="lb-vital-unit">次</span></div></div>
+        <div><div class="lb-vital-label">今日饮水</div><div class="lb-vital-value" id="c-drinks">0<span class="lb-vital-unit">次</span></div></div>
+        <div><div class="lb-vital-label">今日排尿</div><div class="lb-vital-value" id="c-uri">0<span class="lb-vital-unit">次</span></div></div>
+        <div><div class="lb-vital-label">累计尿量</div><div class="lb-vital-value" id="c-urine">0<span class="lb-vital-unit">L</span></div></div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+        <button type="button" class="lb-btn" data-act="drink">给她喝水</button>
+        <button type="button" class="lb-btn" data-act="eat">安排一餐</button>
+        <button type="button" class="lb-btn" data-act="exercise_on" id="btn-ex-on">开始运动</button>
+        <button type="button" class="lb-btn" data-act="exercise_off" id="btn-ex-off">停止运动</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="lb-vitals" id="vitals"></div>
+    </section>
+  </div>
+
+  <div class="lb-grid" style="grid-template-columns:1.4fr 1fr;margin-bottom:14px" id="mid-grid">
+    <section class="lb-card">
+      <div class="lb-card-hd"><h2>她自己会怎么说</h2><span class="lb-card-sub">由引擎直接生成的中文自述</span></div>
+      <div class="lb-speech" id="speech">—</div>
+      <div class="lb-mono" id="brief">—</div>
+    </section>
+    <section class="lb-card">
+      <div class="lb-card-hd"><h2>胃里的东西</h2><span class="lb-card-sub" id="gut-phase">—</span></div>
+      <div class="lb-gut-row"><span>胃内容物</span><b><span id="gut-ml">0</span> mL</b></div>
+      <div class="lb-meter"><i id="gut-bar" style="width:0%"></i></div>
+      <div class="lb-gut-row"><span>最近一餐</span><b id="gut-meal">—</b></div>
+      <div class="lb-gut-row"><span>最近饮品</span><b id="gut-drink">—</b></div>
+      <div class="lb-gut-row"><span>血乙醇</span><b id="gut-bac">0.00 g/L</b></div>
+      <div class="lb-gut-row"><span>咖啡因</span><b id="gut-caf">0 mg</b></div>
+      <div class="lb-card-sub" id="gut-note" style="margin-top:8px"></div>
+    </section>
+  </div>
+
+  <div class="lb-grid" style="grid-template-columns:1fr 1.6fr;margin-bottom:14px" id="low-grid">
+    <section class="lb-card">
+      <div class="lb-card-hd"><h2>体感</h2><span class="lb-card-sub">0–100</span></div>
+      <div class="lb-feel" id="feelings"></div>
+    </section>
+    <section class="lb-card">
+      <div class="lb-card-hd"><h2>最近发生的事</h2><span class="lb-card-sub" id="ev-count">—</span></div>
+      <ul class="lb-ev" id="events"><li><span class="lb-empty">暂无事件</span></li></ul>
+    </section>
+  </div>
+
+  <section class="lb-card">
+    <div class="lb-card-hd"><h2>近 12 小时体征</h2><span class="lb-card-sub">每 60 仿真秒一个采样点</span></div>
+    <div class="lb-charts">
+      <div>
+        <div class="lb-chart-legend">
+          <span><i class="lb-dot" style="background:var(--series-1)"></i>心率 bpm</span>
+          <span><i class="lb-dot" style="background:var(--series-2)"></i>收缩压 mmHg</span>
+          <span><i class="lb-dot" style="background:var(--series-3)"></i>舒张压 mmHg</span>
+        </div>
+        <canvas class="lb-canvas" id="chart-bp" height="260"></canvas>
+      </div>
+      <div>
+        <div class="lb-chart-legend">
+          <span><i class="lb-dot" style="background:var(--series-4)"></i>血糖 mmol/L</span>
+          <span><i class="lb-dot" style="background:var(--series-7)"></i>体温 ℃</span>
+        </div>
+        <canvas class="lb-canvas" id="chart-meta" height="260"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <div class="lb-foot">
+    仿真步长 <span id="foot-dt">10</span> 秒 · 时间流速 <span id="foot-speed">1.0</span>× · 步进异常：<span id="foot-error">无</span><br>
+    数据来自插件后台常驻的生理引擎，页面只读取内存快照，不触发仿真。
+  </div>
+</div>
+<script>
+(function () {
+  'use strict';
+
+  var STATE = { now: null, history: null };
+
+  function $(id) { return document.getElementById(id); }
+  function txt(id, value) { var el = $(id); if (el) el.textContent = value; }
+
+  function showError(msg) {
+    var box = $('err');
+    if (!msg) { if (box) box.classList.remove('on'); return; }
+    if (box) box.classList.add('on');
+    txt('err-text', msg);
+  }
+
+  function num(v, digits) {
+    var n = Number(v);
+    if (!isFinite(n)) return '—';
+    return n.toFixed(digits);
+  }
+
+  function toneClass(tone) {
+    if (tone === 'warn') return 'tone-warn';
+    if (tone === 'crit') return 'tone-crit';
+    if (tone === 'good') return 'tone-good';
+    return '';
+  }
+
+  function renderClock(d) {
+    var c = d.clock || {};
+    txt('clock-time', c.time || '--:--');
+    txt('clock-phase', c.phase || '—');
+    txt('clock-day', '第 ' + (c.day || 1) + ' 天 · 健康 ' + num(c.health, 0) + '/100');
+    var alive = $('clock-alive');
+    if (alive) {
+      var h = d.hospital || {};
+      if (h.critical) {
+        alive.textContent = '生命体征不稳';
+        alive.style.color = 'var(--status-warn)';
+      } else if (h.in_hospital) {
+        alive.textContent = '住院中';
+        alive.style.color = 'var(--status-crit)';
+      } else {
+        alive.textContent = '运行中';
+        alive.style.color = '';
+      }
+    }
+    renderHospital(d);
+    renderLink(d);
+    txt('foot-dt', num(c.dt, 0));
+    txt('foot-speed', num(c.speed, 1));
+    var today = d.today || {};
+    txt('c-meals', today.meals || 0);
+    txt('c-drinks', today.drinks || 0);
+    txt('c-uri', today.urinations || 0);
+    txt('c-urine', num(today.urine_total_l, 2));
+  }
+
+  function renderLink(d) {
+    var box = $('linkbar');
+    if (!box) return;
+    var l = d.link || {};
+    box.className = 'lb-linkbar';
+    var dot = $('link-dot');
+    var text = $('link-text');
+    var meta = $('link-meta');
+    if (!l.enabled) {
+      text.textContent = '联动未开启 · 身体按自身时钟独立运行';
+      meta.textContent = '可在插件配置 [link] 里打开';
+      return;
+    }
+    if (!l.ok) {
+      box.className = 'lb-linkbar err';
+      text.textContent = '联动已开启，但取不到麦生活状态';
+      meta.textContent = (l.last_error || '麦生活可能没在运行').slice(0, 48);
+      return;
+    }
+    box.className = 'lb-linkbar on';
+    var bits = [];
+    if (l.sync_activity) {
+      bits.push('睡眠 ' + (typeof l.sleep === 'number' ? l.sleep.toFixed(2) : '未提供'));
+      bits.push('活动 ' + (l.activity ? l.activity.toFixed(2) : '0.00'));
+    }
+    if (l.sync_meal) bits.push(l.meals_external ? '三餐跟日程' : '三餐备用');
+    if (l.sync_clock && l.clock_offset) bits.push('时钟对齐 ' + (l.clock_offset > 0 ? '+' : '') + l.clock_offset.toFixed(2) + 'h');
+    if (l.inject_state) bits.push('状态注入');
+    if (l.share_state) bits.push('主动分享');
+    if (l.feeding) bits.push('可喂食');
+    text.textContent = '已联动麦生活 · ' + (l.summary || l.phase || '状态同步中');
+    meta.textContent = bits.join('　');
+  }
+
+  function renderHospital(d) {
+    var box = $('hospital');
+    if (!box) return;
+    var h = d.hospital || {};
+    if (!h.in_hospital && !h.critical) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    box.className = 'lb-hospital' + (h.critical && !h.in_hospital ? ' lb-hospital-warn' : '');
+
+    var title = $('hospital-title');
+    var sub = $('hospital-sub');
+    var meta = $('hospital-meta');
+
+    if (h.in_hospital) {
+      title.textContent = '正在医院接受急救';
+      sub.textContent = (h.reason || '生命体征全面恶化') +
+        '　·　还有约 ' + num(h.hours_left, 1) + ' 小时出院';
+    } else {
+      title.textContent = '生命体征不稳，正在观察';
+      sub.textContent = '已持续 ' + num(h.critical_seconds / 60, 0) +
+        ' 分钟，超过阈值将自动送医';
+    }
+
+    var bits = [];
+    if (h.visits) bits.push('累计住院 ' + h.visits + ' 次');
+    bits.push(h.rescue_enabled ? '急救已开启' : '急救已关闭');
+    if (h.silent_hours > 0) {
+      bits.push(h.silent
+        ? '静默中（' + num(h.silent_hours, 0) + ' 小时内不回消息）'
+        : '静默窗口 ' + num(h.silent_hours, 0) + ' 小时');
+    } else {
+      bits.push('不拦截消息');
+    }
+    meta.innerHTML = bits.map(function (b) {
+      return '<span class="lb-hospital-tag">' + b + '</span>';
+    }).join('');
+  }
+
+  function renderVitals(d) {
+    var box = $('vitals');
+    if (!box) return;
+    var items = (d.vitals || []).slice();
+    box.innerHTML = items.map(function (v) {
+      return '<div class="lb-vital ' + toneClass(v.tone) + '">' +
+        '<div class="lb-vital-label">' + v.label + '</div>' +
+        '<div class="lb-vital-value">' + num(v.value, v.value % 1 === 0 ? 0 : 1) +
+        '<span class="lb-vital-unit">' + v.unit + '</span></div>' +
+        '<div class="lb-vital-text">' + (v.text || '\u00a0') + '</div></div>';
+    }).join('');
+  }
+
+  function renderFeelings(d) {
+    var box = $('feelings');
+    if (!box) return;
+    box.innerHTML = (d.feelings || []).map(function (f) {
+      var pct = Math.max(0, Math.min(100, Number(f.value) || 0));
+      return '<div class="lb-feel-row">' +
+        '<span>' + f.label + '</span>' +
+        '<span class="lb-bar"><i style="width:' + pct + '%;background:' + toneColor(f) + '"></i></span>' +
+        '<span class="lb-feel-word">' + (f.text || '') + '</span></div>';
+    }).join('');
+  }
+
+  function toneColor(f) {
+    if (f.tone === 'warn') return 'var(--status-warn)';
+    if (f.tone === 'crit') return 'var(--status-crit)';
+    return 'var(--lb-primary)';
+  }
+
+  function renderGut(d) {
+    var g = d.gut || {};
+    txt('gut-ml', num(g.gastric_ml, 0));
+    txt('gut-phase', g.phase || '—');
+    var bar = $('gut-bar');
+    if (bar) bar.style.width = Math.max(0, Math.min(100, (Number(g.gastric_ml) || 0) / 1500 * 100)) + '%';
+    txt('gut-meal', g.last_meal_items || '还没吃过东西');
+    txt('gut-drink', g.last_drink_items || '还没喝过东西');
+    txt('gut-bac', num(g.bac, 3) + ' g/L' + (g.bac_text ? '（' + g.bac_text + '）' : ''));
+    txt('gut-caf', num(g.caffeine, 0) + ' mg');
+    var note = $('gut-note');
+    if (note) {
+      note.textContent = (Number(g.bac) > 0.1 || Number(g.caffeine) > 40)
+        ? '嗜好品通路：乙醇按零级消除 0.15 g/L·h，咖啡因半衰期 5 小时。'
+        : '';
+    }
+  }
+
+  function renderSpeech(d) {
+    var sp = d.speech || {};
+    txt('speech', sp.describe || '—');
+    txt('brief', sp.brief || '—');
+  }
+
+  var KIND_LABEL = { meal: '进食', drink: '饮水', urination: '排尿', stool: '排便', sleep_start: '入睡', sleep_end: '醒来', alert: '告警', sleep: '睡眠' };
+
+  function renderEvents(d) {
+    var ul = $('events');
+    if (!ul) return;
+    var items = d.events || [];
+    txt('ev-count', '内存中 ' + (d.events_total || items.length) + ' 条');
+    if (!items.length) {
+      ul.innerHTML = '<li><span class="lb-empty">暂无事件</span></li>';
+      return;
+    }
+    ul.innerHTML = items.map(function (e) {
+      return '<li><span class="lb-ev-time">' + (e.clock || '') + '</span>' +
+        '<span>' + esc(e.text || '') + '</span>' +
+        '<span class="lb-tag">' + (KIND_LABEL[e.kind] || e.kind || '') + '</span></li>';
+    }).join('');
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  var FONT = '11px system-ui, -apple-system, "Segoe UI", "Microsoft YaHei UI", sans-serif';
+
+  function drawChart(canvas, series, opts) {
+    if (!canvas || !series.length) return;
+    var ctx = canvas.getContext('2d');
+    var dpr = window.devicePixelRatio || 1;
+    var rect = canvas.getBoundingClientRect();
+    var w = Math.max(240, rect.width || 480);
+    var h = 130;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    var css = getComputedStyle(canvas);
+    var grid = css.getPropertyValue('--chart-grid').trim() || 'rgba(120,120,120,.18)';
+    var axis = css.getPropertyValue('--chart-axis').trim() || 'rgba(120,120,120,.45)';
+
+    var padL = 34, padR = 8, padT = 8, padB = 18;
+    var iw = w - padL - padR, ih = h - padT - padB;
+
+    var all = [];
+    series.forEach(function (s) { s.data.forEach(function (v) { if (isFinite(v)) all.push(v); }); });
+    if (!all.length) return;
+    var min = Math.min.apply(null, all), max = Math.max.apply(null, all);
+    if (opts && opts.zeroBase) min = Math.min(0, min);
+    if (max - min < 1e-6) { max = min + 1; }
+    var pad = (max - min) * 0.12;
+    min -= pad; max += pad;
+
+    ctx.strokeStyle = grid;
+    ctx.lineWidth = 1;
+    ctx.font = FONT;
+    ctx.fillStyle = axis;
+    for (var i = 0; i <= 3; i++) {
+      var y = padT + ih * i / 3;
+      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + iw, y); ctx.stroke();
+      var val = max - (max - min) * i / 3;
+      ctx.fillText(val.toFixed(opts && opts.tick === 2 ? 1 : 0), 2, y + 3.5);
+    }
+
+    series.forEach(function (s) {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = 1.8;
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      var n = s.data.length;
+      var started = false;
+      for (var k = 0; k < n; k++) {
+        var v = s.data[k];
+        if (!isFinite(v)) { started = false; continue; }
+        var px = padL + (n <= 1 ? iw / 2 : iw * k / (n - 1));
+        var py = padT + ih - ih * (v - min) / (max - min);
+        if (!started) { ctx.moveTo(px, py); started = true; } else { ctx.lineTo(px, py); }
+      }
+      ctx.stroke();
+    });
+
+    ctx.strokeStyle = axis;
+    ctx.beginPath(); ctx.moveTo(padL, padT + ih); ctx.lineTo(padL + iw, padT + ih); ctx.stroke();
+
+    var labels = (opts && opts.labels) || [];
+    if (labels.length) {
+      ctx.fillStyle = axis;
+      ctx.fillText(labels[0] || '', padL, h - 6);
+      var mid = labels[Math.floor(labels.length / 2)] || '';
+      var mw = ctx.measureText(mid).width;
+      ctx.fillText(mid, padL + iw / 2 - mw / 2, h - 6);
+      var last = labels[labels.length - 1] || '';
+      var lw = ctx.measureText(last).width;
+      ctx.fillText(last, padL + iw - lw, h - 6);
+    }
+  }
+
+  function renderCharts() {
+    var h = STATE.history || {};
+    var s = h.series || {};
+    var labels = h.labels || [];
+    drawChart($('chart-bp'), [
+      { data: s.hr || [], color: '#2a78d6' },
+      { data: s.sbp || [], color: '#eb6834' },
+      { data: s.dbp || [], color: '#1baf7a' }
+    ], { labels: labels, tick: 0 });
+    drawChart($('chart-meta'), [
+      { data: s.glucose || [], color: '#eda100' },
+      { data: s.temp || [], color: '#6250d6' }
+    ], { labels: labels, tick: 2 });
+  }
+
+  async function loadNow() {
+    try {
+      var res = await window.maibot.query('now', {});
+      if (res && res.success === false) { showError(res.error || 'now 返回失败'); return; }
+      STATE.now = res || {};
+      showError('');
+      renderClock(STATE.now);
+      renderVitals(STATE.now);
+      renderFeelings(STATE.now);
+      renderGut(STATE.now);
+      renderSpeech(STATE.now);
+      renderEvents(STATE.now);
+      txt('hdr-version', 'v' + (STATE.now.version || '?'));
+      txt('hdr-generated', (STATE.now.generated_at || '').replace('T', ' '));
+      var err = STATE.now.error;
+      txt('foot-error', err ? err : '无');
+      var on = (STATE.now.clock && STATE.now.clock);
+      var exOn = $('btn-ex-on'), exOff = $('btn-ex-off');
+      if (exOn && exOff) { exOn.disabled = false; exOff.disabled = false; }
+      void on;
+    } catch (e) {
+      showError('拉取身体状态失败：' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function loadHistory() {
+    try {
+      var res = await window.maibot.query('history', { hours: 12 });
+      if (res && res.success === false) { showError(res.error || 'history 返回失败'); return; }
+      STATE.history = res || {};
+      renderCharts();
+    } catch (e) {
+      showError('拉取体征曲线失败：' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function act(kind, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      var res = await window.maibot.action('intervene', { kind: kind });
+      if (res && res.success === false) { showError(res.error || '干预失败'); return; }
+      await loadNow();
+      await loadHistory();
+    } catch (e) {
+      showError('干预失败：' + (e && e.message ? e.message : e));
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function bindActions() {
+    document.querySelectorAll('[data-act]').forEach(function (btn) {
+      btn.addEventListener('click', function () { act(btn.getAttribute('data-act'), btn); });
+    });
+    var refresh = $('btn-refresh');
+    if (refresh) refresh.addEventListener('click', function () { loadNow(); loadHistory(); });
+    var tl = $('btn-timeline');
+    if (tl) tl.addEventListener('click', function () { window.maibot.navigate('timeline', {}); });
+    var og = $('btn-organs');
+    if (og) og.addEventListener('click', function () { window.maibot.navigate('organs', {}); });
+  }
+
+  function boot() {
+    bindActions();
+    loadNow();
+    loadHistory();
+    setInterval(loadNow, 15000);
+    setInterval(loadHistory, 60000);
+    window.addEventListener('maibot:context', function (ev) {
+      var ctx = ev && ev.detail ? ev.detail : null;
+      if (!ctx) return;
+      txt('hdr-theme', (ctx.theme === 'dark' ? '暗色' : '亮色'));
+      loadHistory();
+    });
+  }
+
+  window.maibot.ready.then(function (ctx) {
+    txt('hdr-theme', (ctx && ctx.theme === 'dark' ? '暗色' : '亮色'));
+    boot();
+  });
+})();
+</script>

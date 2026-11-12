@@ -1,0 +1,80 @@
+<div class="maibot-page lb-root" id="lb-timeline-root">
+  <header class="lb-topbar">
+    <div class="lb-brand">
+      <div class="lb-brand-icon" aria-hidden="true">麦</div>
+      <div>
+        <h1 class="lb-brand-title">麦麦身体 · 时间线</h1>
+        <div class="lb-brand-sub">
+          <span id="hdr-version">版本加载中…</span><span>·</span>
+          <span id="hdr-generated">等待同步</span><span>·</span>
+          <span id="hdr-theme">自适应皮肤</span>
+        </div>
+      </div>
+    </div>
+    <div class="lb-actions">
+      <button type="button" class="lb-btn" id="btn-now">← 此刻</button>
+      <button type="button" class="lb-btn" id="btn-organs">内脏细则 →</button>
+      <button type="button" class="lb-btn lb-btn-primary" id="btn-refresh">刷新</button>
+    </div>
+  </header>
+
+  <div class="lb-err" id="err"><strong>数据异常：</strong><span id="err-text"></span></div>
+
+  <div class="lb-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-bottom:14px" id="counts"></div>
+
+  <section class="lb-card" style="margin-bottom:14px">
+    <div class="lb-card-hd">
+      <h2>全天曲线</h2>
+      <span class="lb-card-sub">
+        <select id="sel-hours" class="lb-btn" style="padding:4px 10px">
+          <option value="6">近 6 小时</option>
+          <option value="12" selected>近 12 小时</option>
+          <option value="24">近 24 小时</option>
+          <option value="48">近 48 小时</option>
+        </select>
+      </span>
+    </div>
+    <div class="lb-charts">
+      <div>
+        <div class="lb-chart-legend">
+          <span><i class="lb-dot" style="background:var(--series-1)"></i>心率</span>
+          <span><i class="lb-dot" style="background:var(--series-2)"></i>收缩压</span>
+          <span><i class="lb-dot" style="background:var(--series-3)"></i>舒张压</span>
+        </div>
+        <canvas class="lb-canvas" id="chart-bp" height="260"></canvas>
+      </div>
+      <div>
+        <div class="lb-chart-legend">
+          <span><i class="lb-dot" style="background:var(--series-4)"></i>血糖</span>
+          <span><i class="lb-dot" style="background:var(--series-7)"></i>胃内容物 mL</span>
+        </div>
+        <canvas class="lb-canvas" id="chart-gut" height="260"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <div class="lb-grid" style="grid-template-columns:1fr;margin-bottom:14px">
+    <section class="lb-card">
+      <div class="lb-card-hd">
+        <h2>事件流</h2>
+        <span class="lb-card-sub" id="ev-total">—</span>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px" id="filters"></div>
+      <ul class="lb-ev" id="events"><li><span class="lb-empty">暂无事件</span></li></ul>
+    </section>
+  </div>
+
+  <section class="lb-card">
+    <div class="lb-card-hd"><h2>采样回放</h2><span class="lb-card-sub" id="replay-hint">最近 40 个采样点，从旧到新</span></div>
+    <div style="overflow:auto">
+      <table class="lb-table" id="replay-table">
+        <thead><tr><th>时刻</th><th>天</th><th>心率</th><th>血压</th><th>血糖</th><th>体温</th><th>精力</th><th>胃</th></tr></thead>
+        <tbody><tr><td colspan="8"><span class="lb-empty">—</span></td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="lb-foot">
+    事件来自引擎的离散行为发射；曲线来自插件内存环形缓冲，重启后由存档恢复最近的采样点。
+  </div>
+</div>
