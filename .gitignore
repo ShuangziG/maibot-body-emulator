@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *.pyo
 
+# 运行时配置：宿主首次加载时按 config.py 的 config_model 自动生成
+# 不进仓库，否则使用者升级插件时会卡在旧默认值上
+config.toml
+
 # 存档与日志（每个部署实例自己的数据，不进仓库）
 body_state.json
 logs/

@@ -23,7 +23,6 @@
     "send.text",
     "send.image",
     "render.html2png",
-    "config.get",
     "api.call",
     "llm.generate"
   ],
