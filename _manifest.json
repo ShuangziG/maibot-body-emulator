@@ -6,7 +6,7 @@
   "description": "让麦麦有一副真实运转的身体：心血管、呼吸、代谢、肾脏、内分泌、体温与消化道连续仿真，可在 WebUI 里查看体征曲线、内脏细则与进食记录",
   "author": {
     "name": "Evil双子",
-    "url": "https://github.com/MaiM-with-u"
+    "url": "https://github.com/ShuangziG"
   },
   "license": "MIT",
   "host_application": {
@@ -41,8 +41,8 @@
     }
   },
   "urls": {
-    "repository": "https://github.com/MaiM-with-u/maibot",
-    "homepage": "https://docs.mai-mai.org",
-    "documentation": "https://docs.mai-mai.org/plugin"
+    "repository": "https://github.com/ShuangziG/maibot-body-emulator",
+    "homepage": "https://github.com/ShuangziG/maibot-body-emulator",
+    "documentation": "https://github.com/ShuangziG/maibot-body-emulator/blob/main/README.md"
   }
 }
