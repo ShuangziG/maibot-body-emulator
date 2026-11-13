@@ -86,11 +86,7 @@ class SpeechConfig(PluginConfigBase):
 
 
 class RescueConfig(PluginConfigBase):
-    """濒死急救。
-
-    默认关闭：开箱即用的插件不该替使用者决定「病重了要不要强行送医」。
-    关闭时引擎照样计算健康值，降到 0 也只是状态很差，人不会死、不会被强制打断对话。
-    """
+    """濒死急救。默认关闭，开启后根据身体健康状态决定是否就医，就医过程中会影响回复功能。"""
 
     __ui_label__ = "急救"
     __ui_icon__ = "heart-pulse"
@@ -135,11 +131,7 @@ class RescueConfig(PluginConfigBase):
 
 
 class LinkConfig(PluginConfigBase):
-    """与麦生活（mai-life）联动。
-
-    总开关关闭时，本插件完全独立运行，不向麦生活发起任何调用，也不读取它的状态；
-    麦生活是否在跑、是否报错，都不影响身体的推进。
-    """
+    """与麦生活（mai-life）插件日程联动功能，关闭时本插件独立运行，启用后需要重启一次MaiBot本体生效。"""
 
     __ui_label__ = "联动"
     __ui_icon__ = "link"
@@ -208,11 +200,7 @@ class LinkConfig(PluginConfigBase):
 
 
 class FeedingConfig(PluginConfigBase):
-    """聊天喂食。
-
-    默认关闭：这条路径会把聊天内容写进生理模型，属于需要使用者主动开启的能力。
-    关闭时三餐仍按内置饭点（或麦生活联动）自主发生，身体不会饿坏。
-    """
+    """聊天喂食。只影响是否能通过对话额外投喂，开启后调用utils模型理解食物成分。"""
 
     __ui_label__ = "聊天喂食"
     __ui_icon__ = "utensils"
@@ -234,12 +222,7 @@ class FeedingConfig(PluginConfigBase):
 
 
 class ExcretionConfig(PluginConfigBase):
-    """排泄。
-
-    关掉某一项只影响「事件记录与聊天里看到的」，体液与残渣的守恒计算照常进行 ——
-    否则关掉排尿会让总体水一路涨、关掉排便会把结肠残渣顶到上限，
-    反而把生理数字搞坏。
-    """
+    """排泄。关掉某一项只影响「事件记录与聊天里看到的」，体液与残渣的守恒计算照常进行。"""
 
     __ui_label__ = "排泄"
     __ui_icon__ = "droplet"
