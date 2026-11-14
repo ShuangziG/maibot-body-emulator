@@ -63,6 +63,10 @@ class LifeLink:
         self._fail_count = 0
         self._last_error = ""
         self._last_ok = 0.0
+        # 室外天气（2026-11-14）
+        self._weather_cache: dict = {}
+        self._last_indoor = True
+        self._location_hint = ""
 
     # ------------------------------------------------------------------
     @property
@@ -212,6 +216,120 @@ class LifeLink:
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 室外天气（2026-11-14 新增）
+    # ------------------------------------------------------------------
+    # 麦生活不暴露湿度：它的请求参数只有 temperature_2m,weather_code
+    # （environment.py 的 current 字段），所以缓存里也没有湿度。而体感温度
+    # 离开湿度算不准 —— 35℃ 干燥和 35℃ 潮湿是两种体验。
+    # 这里直连 Open-Meteo 拿齐温湿度；经纬度暂时用北京（麦生活没公开坐标），
+    # 城市可以在配置里指定。
+    # 任何失败都降级为 None，绝不影响身体推进。
+    # 日程摘要里的运动关键词。麦生活的 kind 没有 exercise，
+    # 只能从 summary 自由文本认（"去操场跑步"/"健身房练腿"）。
+    _EXERCISE_WORDS = (
+        "跑步", "慢跑", "晨跑", "夜跑", "跑了", "长跑",
+        "健身", "练腿", "撸铁", "举铁", "力量训练",
+        "游泳", "骑车", "单车", "骑行",
+        "打球", "篮球", "羽毛球", "乒乓", "排球", "足球", "网球",
+        "瑜伽", "跳操", "跳绳", "拉伸", "爬山", "徒步", "散步",
+        "锻炼", "运动", "热身", "有氧", "HIIT",
+    )
+    # 强度分档：这些是高强度，其余按中等算
+    _EXERCISE_HIGH = (
+        "跑步", "慢跑", "晨跑", "夜跑", "长跑", "跳绳", "HIIT",
+        "游泳", "打球", "篮球", "羽毛球", "足球", "网球", "爬山",
+    )
+
+    _INDOOR_WORDS = (
+        "家", "卧室", "客厅", "房间", "宿舍", "寝室", "图书馆", "教室",
+        "办公室", "公司", "食堂", "餐厅", "商场", "超市", "咖啡", "书店",
+        "实验室", "机房", "室内", "屋里", "床上", "沙发", "地铁", "公交",
+        "医院", "厨房", "书房", "走廊", "浴室",
+    )
+    _OUTDOOR_WORDS = (
+        "公园", "操场", "跑道", "路上", "街上", "街道", "户外", "室外",
+        "骑车", "散步", "爬山", "海边", "湖边", "广场", "球场", "露天",
+        "天台", "阳台", "门口", "小区", "校园", "步行", "跑步",
+    )
+
+    def guess_indoor(self, location: str = "") -> bool:
+        """按当前场景的地点猜室内外。猜不出就沿用上次（默认室内）。"""
+
+        loc = str(location or self._location_hint or "")
+        if not loc:
+            return bool(self._last_indoor)
+        for w in self._INDOOR_WORDS:
+            if w in loc:
+                self._last_indoor = True
+                return True
+        for w in self._OUTDOOR_WORDS:
+            if w in loc:
+                self._last_indoor = False
+                return False
+        return bool(self._last_indoor)
+
+    def detect_exercise(self, summary: str) -> str:
+        """从日程摘要认出运动种类。返回 '' 表示不是运动。
+
+        麦生活的 kind 只有 8 种，没有 exercise，所以只能看 summary 文本。
+        返回 "high" / "mid" 表示强度档，供引擎决定心率上抬幅度。
+        """
+
+        text = str(summary or "")
+        if not text:
+            return ""
+        hit_any = False
+        is_high = False
+        for w in self._EXERCISE_WORDS:
+            if w in text:
+                hit_any = True
+                if w in self._EXERCISE_HIGH:
+                    is_high = True
+        if not hit_any:
+            return ""
+        return "high" if is_high else "mid"
+
+    async def fetch_outdoor(self, timezone: str = "Asia/Shanghai",
+                            location: str = "") -> dict | None:
+        """拿一次室外天气，附带室内外判断。失败返回 None。
+
+        城市名写在配置里，插件自己解析成坐标 —— 不去同步麦生活，
+        因为它的天气接口不公开、也不含湿度。
+        """
+
+        if not bool(getattr(self._cfg, "weather_enabled", True)):
+            return None
+        try:
+            from .body import weather as wx
+            city = str(getattr(self._cfg, "weather_city", "") or "").strip() or "北京"
+            loc = wx.geocode_city(city)
+            if not loc:
+                # 城市解析不出来时退回北京，而不是干脆没有天气
+                loc = wx.geocode_city("北京")
+            if not loc:
+                return None
+            lat, lon = loc
+            data = wx.fetch_weather(lat, lon, timezone=timezone,
+                                    cache=self._weather_cache,
+                                    refresh_seconds=float(getattr(
+                                        self._cfg, "weather_refresh_seconds", 1800.0)))
+            if not data:
+                return None
+            self._weather_cache = data
+            out = dict(data)
+            indoor = self.guess_indoor(location)
+            out["indoor"] = indoor
+            # 风寒只在室外生效：室内风速被墙体挡住，"风"这一项没有意义
+            wind = float(data.get("wind_ms", 0.0)) if not indoor else 0.0
+            out["wind_ms"] = wind
+            out["feels_c"] = wx.feels_like(data["temp_c"], data["humidity"],
+                                           wind if data["temp_c"] <= 10.0 else 0.0)
+            out["load"] = wx.outdoor_load(data["temp_c"], data["humidity"], wind)
+            return out
+        except Exception:
+            return None
+
     async def clock_offset(self, body_hour: float) -> float:
         """算出让身体时钟对齐麦生活环境时钟的相位差（小时）。
 

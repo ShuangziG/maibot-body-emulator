@@ -28,6 +28,7 @@ from maibot_sdk.types import (
 
 from .body import BodyEngine, BodyState, EventBus, brief, build_html, describe
 from .body.food import (
+    _FOOD_EXTRA_ADDED,
     ALL_FOODS,
     DRINK_POOL,
     FOODS,
@@ -42,9 +43,17 @@ from .body.translate import FEELING_LEVELS, drunk_level, eat_phase, phase
 from .config import LifeBodyConfig
 from .link import LifeLink
 
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 H2S = 3600.0
 SAVE_FILE = "body_state.json"
+
+# 生理波形缓冲区的「超前起点」（秒）。
+# 前端 webui/organs.html 用 WAVE_WINDOW_SEC=8 的窗口显示波形，屏幕右缘是
+# 「现在」。所以后端生成的样本必须从「现在-8s」开始，前端才能按绝对时间
+# 去索引数据池 —— 这样每次重新拉取时窗口接得上，不会跳帧。
+# 缓冲区总长由前端传入的 seconds（20s）决定，覆盖 [现在-8s, 现在+12s]，
+# 前端在 10s 时预取下一批，正好留 2s 余量。
+_WAVE_LEAD_SEC = 8.0
 
 # 体征展示定义：(字段, 中文名, 单位, 小数位, 正常区间, 偏低词, 偏高词)
 VITALS = [
@@ -224,6 +233,7 @@ class LifeBodyPlugin(MaiBotPlugin):
         self._share_armed = True
         self._link: LifeLink | None = None
         self._link_task: asyncio.Task | None = None
+        self._weather_task: asyncio.Task | None = None
         # 联动进餐的去重键。必须存在插件自己身上、不能只存在 LifeLink 里：
         # on_load 的顺序是 _restore() 早于 LifeLink 构造，那时 self._link 还是
         # None，往 self._link 上恢复键值会静默失败，于是每次重启当天已经吃过
@@ -282,10 +292,16 @@ class LifeBodyPlugin(MaiBotPlugin):
         self._task = asyncio.create_task(self._ticker())
         if cfg.link.enabled:
             self._link_task = asyncio.create_task(self._linker())
+        # 天气独立于联动：联动关了天气也要照常更新（外面冷不冷跟麦生活无关）
+        if bool(getattr(cfg.link, "weather_enabled", True)):
+            self._weather_task = asyncio.create_task(self._weather_loop())
         self._ready = True
+        # 食物条数写进启动日志：食物库扩展是「静默装配」的，没有这行
+        # 就只能靠面板去数，出问题时（扩展没装上/版本错）看不出来。
         self._get_logger().info(
-            "麦麦身体已启动：仿真第 %.1f 天 %s，心率 %.0f",
+            "麦麦身体已启动：仿真第 %.1f 天 %s，心率 %.0f，食物 %d 种%s",
             self._body_sim_day(), _clock(self._s.hour), self._s.hr,
+            len(FOODS), "" if _FOOD_EXTRA_ADDED > 0 else "（扩展未装）",
         )
 
     async def on_unload(self) -> None:
@@ -305,6 +321,13 @@ class LifeBodyPlugin(MaiBotPlugin):
             except (asyncio.CancelledError, Exception):  # noqa: BLE001 - 卸载期不抛
                 pass
             self._link_task = None
+        if self._weather_task is not None:
+            self._weather_task.cancel()
+            try:
+                await self._weather_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001 - 卸载期不抛
+                pass
+            self._weather_task = None
         await self._save()
         self._ready = False
 
@@ -332,6 +355,58 @@ class LifeBodyPlugin(MaiBotPlugin):
         self._engine._meals_external = bool(
             want and self.config.link.sync_meal
         )
+
+        # 月经周期配置注入（默认关闭）
+        cycle_cfg = getattr(self.config, "cycle", None)
+        if cycle_cfg is not None:
+            self._engine.cycle_enabled = bool(getattr(cycle_cfg, "enabled", False))
+            self._engine.cycle_length_days = max(
+                18.0, min(45.0, float(getattr(cycle_cfg, "cycle_length", 28.0)))
+            )
+            self._engine.cycle_pain_enabled = bool(
+                getattr(cycle_cfg, "pain_enabled", True)
+            )
+            self._engine.MENSTRUAL_LENGTH = max(
+                1.0, min(10.0, float(getattr(cycle_cfg, "period_length", 5.0)))
+            )
+            # 现实日历锚点：填了「上次月经第一天」就按日历算周期第几天，
+            # 留空/写错/写未来都退回「从启用那刻累加」的旧行为。
+            self._engine.set_cycle_anchor(
+                self._parse_cycle_anchor(getattr(cycle_cfg, "last_period_date", ""))
+            )
+
+        # 运动配置注入
+        ex_cfg = getattr(self.config, "exercise", None)
+        if ex_cfg is not None:
+            self._engine.exercise_enabled = bool(getattr(ex_cfg, "enabled", True))
+            self._engine.exercise_max_minutes = max(
+                5.0, float(getattr(ex_cfg, "max_minutes", 45.0)))
+            self._engine.exercise_interval_minutes = max(
+                3.0, float(getattr(ex_cfg, "interval_minutes", 15.0)))
+            self._engine.exercise_min_energy = max(
+                10.0, min(95.0, float(getattr(ex_cfg, "min_energy", 55.0))))
+            self._engine.exercise_min_sleep_hours = max(
+                0.0, float(getattr(ex_cfg, "min_sleep_hours", 6.0)))
+
+        # 睡眠配置注入。联动开启时，唤醒与拦截都以麦生活的日程为准，
+        # 这两个开关自动失效（配置里也写明了会失效）。
+        sleep_cfg = getattr(self.config, "sleep", None)
+        if sleep_cfg is not None:
+            self._engine.sleep_start_hour = float(getattr(sleep_cfg, "start_hour", 23.0))
+            self._engine.sleep_end_hour = float(getattr(sleep_cfg, "end_hour", 7.0))
+            self._engine.wake_hold_minutes = max(
+                0.0, float(getattr(sleep_cfg, "wake_hold_minutes", 10.0))
+            )
+            self._engine.wake_on_message = bool(
+                getattr(sleep_cfg, "wake_on_message", True)
+            ) and not want
+            # 强制睡眠：连续清醒过久会睡过去。设 0 表示关闭。
+            _fsa = float(getattr(sleep_cfg, "force_sleep_after_hours", 20.0))
+            self._engine.force_sleep_after_hours = _fsa if _fsa > 0.0 else 9999.0
+            self._engine.force_sleep_hours = max(
+                1.0, float(getattr(sleep_cfg, "force_sleep_hours", 6.0)))
+            self._engine.force_sleep_wakeable = bool(
+                getattr(sleep_cfg, "force_sleep_wakeable", True))
         if not want:
             # 关掉联动时立刻回到中性（-1 = 无外部意见），避免残留值继续压低心率。
             # 注意这里不能写 0.0：0.0 是"外部明确说清醒"，只在联动开着时才有意义。
@@ -358,6 +433,117 @@ class LifeBodyPlugin(MaiBotPlugin):
             "rescue_restore_health": max(0.0, min(100.0, float(cfg.restore_health))),
             "enable_void": bool(getattr(exc, "show_urination", True)) if exc else True,
             "enable_stool": bool(getattr(exc, "show_stool", True)) if exc else True,
+        }
+
+    def _sleep_view(self) -> dict[str, Any]:
+        """睡眠面板：四态分期、整夜结构、质量评分、睡眠债。"""
+
+        s = self._s
+        stage_zh = {"awake": "清醒", "light": "浅睡", "deep": "深睡", "rem": "快速眼动"}
+        total = s.dur_light + s.dur_deep + s.dur_rem
+        hours = total / H2S
+
+        def pct(x: float) -> float:
+            return round(100.0 * x / total, 1) if total > 0 else 0.0
+
+        return {
+            "stage": s.sleep_stage,
+            "stage_text": stage_zh.get(s.sleep_stage, s.sleep_stage),
+            "depth": _r(s.sleep_depth, 2),
+            "sleeping": bool(s.sleeping),
+            "cycle_index": int(s.stage_index),
+            "cycle_pos": _r(s.cycle_pos, 2),
+            "debt_h": _r(s.sleep_debt, 2),
+            "quality": _r(s.sleep_quality, 0),
+            "total_h": _r(hours, 2),
+            "light_h": _r(s.dur_light / H2S, 2),
+            "deep_h": _r(s.dur_deep / H2S, 2),
+            "rem_h": _r(s.dur_rem / H2S, 2),
+            "light_pct": pct(s.dur_light),
+            "deep_pct": pct(s.dur_deep),
+            "rem_pct": pct(s.dur_rem),
+            # 夜间唤醒统计（2026-11-14）
+            "wake_count": int(s.wake_count),
+            "wake_by_message": int(s.wake_by_message),
+            "wake_by_thirst": int(s.wake_by_thirst),
+            "wake_by_bladder": int(s.wake_by_bladder),
+            "wake_pending": bool(s.wake_pending),
+            "last_wake_reason": str(s.last_wake_reason or ""),
+            "awake_h": _r(s.dur_awake / H2S, 2),
+            # 强制睡眠（连续清醒过久的微睡眠）
+            "forced_sleep": bool(getattr(s, "forced_sleep", False)),
+            "microsleep_count": int(getattr(s, "microsleep_count", 0) or 0),
+            "awake_hours": _r(getattr(s, "awake_hours", 0.0), 1),
+        }
+
+    def _parse_cycle_anchor(self, raw: Any):
+        """把配置里的「上次月经第一天」解析成 date。
+
+        空字符串、格式不对、日期在未来，一律返回 None（= 不锚定）。
+        之所以不抛异常：配置写错不该让整个插件起不来，也不该让周期停在
+        某个奇怪相位上 —— 退回旧的累加行为，并在日志里说清楚为什么。
+        """
+        text = str(raw or "").strip()
+        if not text:
+            self._cycle_anchor_note = "未填日期，周期从启用那一刻自己累加"
+            return None
+        # 容忍常见写法：2026/01/01、2026.1.5、2026年1月1日、20260101。
+        # 只认一种分隔符对使用者太苛刻（面板里也没地方写格式提示之外的东西）。
+        norm = text
+        for sep in ("年", "月", "/", ".", " ", "\t"):
+            norm = norm.replace(sep, "-")
+        norm = norm.replace("日", "")
+        norm = "-".join(p for p in norm.split("-") if p.strip())
+        day = None
+        for fmt, candidate in ((("%Y-%m-%d"), norm),
+                               (("%Y%m%d"), norm.replace("-", ""))):
+            try:
+                day = datetime.strptime(candidate, fmt).date()
+                break
+            except ValueError:
+                continue
+        if day is None:
+            self._cycle_anchor_note = f"日期「{text}」没认出来，已退回从启用那一刻算"
+            self._get_logger().warning(
+                "cycle.last_period_date 不是合法日期（%r），按未设置处理；"
+                "周期退回「从启用那刻开始累加」", text)
+            return None
+        today = datetime.now().date()
+        if day > today:
+            self._cycle_anchor_note = f"日期 {day.isoformat()} 在今天之后，已退回从启用那一刻算"
+            self._get_logger().warning(
+                "cycle.last_period_date 在未来（%s > 今天 %s），按未设置处理",
+                day.isoformat(), today.isoformat())
+            return None
+        self._cycle_anchor_note = f"相位按现实日历，从 {day.isoformat()} 起算"
+        return day
+
+    def _cycle_view(self) -> dict[str, Any]:
+        """月经面板：双相位、激素水平、经期状态、疼痛。"""
+
+        s = self._s
+        anchor = getattr(self._engine, "cycle_anchor_date", None)
+        phase_zh = {"follicular": "卵泡期", "ovulation": "排卵期", "luteal": "黄体期"}
+        uterus_zh = {"menstrual": "行经期", "proliferative": "增殖期", "secretory": "分泌期"}
+        return {
+            "day": _r(s.menstrual_day, 1),
+            "length": _r(s.cycle_length, 0),
+            "phase": s.menstrual_phase,
+            "phase_text": phase_zh.get(s.menstrual_phase, "-"),
+            "uterus_phase": s.uterus_phase,
+            "uterus_text": uterus_zh.get(s.uterus_phase, "-"),
+            "menstruating": bool(s.menstruating),
+            "flow": _r(s.menstrual_flow, 2),
+            "estrogen": _r(s.estrogen, 2),
+            "progesterone": _r(s.progesterone, 2),
+            "pain": _r(s.pain, 1),
+            "follicle_maturing": bool(s.follicle_maturing),
+            "luteal_maturing": bool(s.luteal_maturing),
+            # 第几天是按什么算的：calendar=现实日历锚点，sim=从启用那刻累加
+            "day_source": "calendar" if anchor else "sim",
+            "anchor_date": anchor.isoformat() if anchor else "",
+            # 一句人话，说明相位依据；日期填错时这里也会说清楚
+            "anchor_note": getattr(self, "_cycle_anchor_note", ""),
         }
 
     def _link_view(self) -> dict[str, Any]:
@@ -504,6 +690,59 @@ class LifeBodyPlugin(MaiBotPlugin):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    async def _weather_loop(self) -> None:
+        """独立的天气轮询。与联动解耦：联动关了也照常更新室外环境。"""
+
+        interval = max(300.0, float(getattr(self.config.link, "weather_refresh_seconds", 1800.0)))
+        # 启动后先拉一次，避免头半小时没有天气数据
+        try:
+            await self._refresh_outdoor()
+        except Exception:
+            pass
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                if not self._ready:
+                    continue
+                await self._refresh_outdoor()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 天气失败不影响身体
+                self._get_logger().debug("天气刷新失败: %s: %s", type(exc).__name__, exc)
+
+    async def _refresh_outdoor(self) -> None:
+        """拉一次室外天气并写进状态。任何失败静默降级。"""
+
+        link = self._link
+        if link is None:
+            return
+        cfg = self.config
+        tz = "Asia/Shanghai"
+        env_cfg = getattr(cfg, "environment", None)
+        if env_cfg is not None:
+            tz = str(getattr(env_cfg, "timezone", "") or tz)
+        # 室内外判断要用当前场景地点
+        loc = str(getattr(link, "_location_hint", "") or "")
+        try:
+            scene = await link._call("get_current_scene")
+            cur = (scene or {}).get("current") or {}
+            loc = str(cur.get("location") or "") or loc
+            link._location_hint = loc
+        except Exception:
+            pass
+
+        outdoor = await link.fetch_outdoor(timezone=tz, location=loc)
+        if not outdoor:
+            return
+        s = self._s
+        s.env_temp_c = float(outdoor.get("temp_c") or 22.0)
+        s.env_humidity = float(outdoor.get("humidity") or 50.0)
+        s.env_feels_c = float(outdoor.get("feels_c") or 22.0)
+        s.env_load = float(outdoor.get("load") or 0.0)
+        s.env_indoor = bool(outdoor.get("indoor", True))
+        s.env_updated_at = float(outdoor.get("fetched_at") or 0.0)
+        s.env_wind_ms = float(outdoor.get("wind_ms") or 0.0)
+
     async def _linker(self) -> None:
         """联动后台循环：定时拉麦生活状态，喂给引擎。
 
@@ -559,6 +798,30 @@ class LifeBodyPlugin(MaiBotPlugin):
             raw_sleep = data.get("sleep")
             engine.link_sleep = -1.0 if raw_sleep is None else float(raw_sleep)
             engine.link_activity = float(data.get("activity") or 0.0)
+
+        # ---- 日程运动（2026-11-14）----
+        # 麦生活的 kind 没有 exercise，只能从 summary 认。
+        # 认出来之后还要过一遍身体否决：外面暴晒/刮风/正在痛经就不跑。
+        ex_cfg = getattr(self.config, "exercise", None)
+        if ex_cfg is not None and bool(getattr(ex_cfg, "enabled", True)):
+            if not engine.s.exercise_intent:
+                try:
+                    scene = await link._call("get_current_scene")
+                    cur = (scene or {}).get("current") or {}
+                    summary = str(cur.get("summary") or "")
+                    kind = str(cur.get("kind") or "")
+                    level = link.detect_exercise(summary)
+                    if level and kind not in ("sleep", "nap"):
+                        ok = engine.request_exercise(level, 30.0)
+                        if ok:
+                            self._get_logger().info(
+                                "日程运动已接受：%s（%s）", summary, level)
+                        elif engine.s.exercise_refused:
+                            self._get_logger().info(
+                                "日程运动被身体否决：%s → %s",
+                                summary, engine.s.exercise_refused)
+                except Exception:
+                    pass
 
         if cfg.sync_meal:
             slot, key, summary, items = await link.meal_trigger(self._s.hour)
@@ -1011,6 +1274,9 @@ class LifeBodyPlugin(MaiBotPlugin):
                     "bac_text": drunk_level(s.bac) if s.bac > 0.10 else "",
                     "caffeine": _r(s.caffeine, 1),
                 },
+                "sleep": self._sleep_view(),
+                "cycle": self._cycle_view(),
+                "cycle_enabled": bool(getattr(self.config.cycle, "enabled", False)),
                 "today": self._today(),
                 "events": list(self._events)[-12:][::-1],
                 "stock": list(self._samples)[-40:],
@@ -1063,6 +1329,86 @@ class LifeBodyPlugin(MaiBotPlugin):
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
 
+    @API(name="webui_waveforms", description="生理波形：ECG 心电与 EEG 脑电的实时合成数据", version="1", public=False)
+    async def webui_waveforms(self, seconds: float = 10.0, **kwargs: Any) -> dict[str, Any]:
+        """返回 ECG 与 EEG 的波形点数组。
+
+        波形是**按当前生理状态实时合成**的，不落库 —— 真实采样率下
+        一分钟就是上万点，存档会爆炸。前端每次刷新重新取。
+
+        时间约定（前端依赖，改这里必须同步改 webui/organs.html）：
+          - 相位用**墙钟**推进，不用仿真时间（dt=10s，拿它当相位会每步跳一次）。
+          - 返回 t0 = 第一个采样点的 epoch 秒，缓冲区覆盖 [t0, t0+seconds]。
+          - t0 固定取 「现在 - _WAVE_LEAD_SEC(8s)」，于是缓冲区覆盖
+            [现在-8s, 现在+12s]：前端以 8 秒窗口显示「到此刻为止」，
+            10 秒后预取下一批时正好接上，看不出接缝。
+
+        2026-11-14 修：旧实现没有时间参数，generate_ecg/generate_eeg 每次都从
+        t=0 开始生成，连续两次调用返回的点完全相同 —— 视觉上就是一段波形
+        无限循环重播。现在实测连续两次调用结果不同，且跨批次重叠区逐点一致。
+
+        注意：这是仿真波形，不是医学数据。
+        """
+
+        del kwargs
+        if not self._ready:
+            return {"success": False, "error": "身体尚未就绪"}
+        try:
+            s = self._s
+            from .body import ecg as _ecg, eeg as _eeg
+
+            win = max(3.0, min(30.0, float(seconds)))
+
+            # ---- 时间基准：用墙钟，不用仿真步 ----
+            # 仿真 dt=10 秒一步，如果拿仿真时间当波形相位，扫描头会每 10 秒
+            # 跳一次。波形要像监护仪一样「现在这一刻也在走」，就必须用墙钟。
+            # t_off 是缓冲区第一个采样点对应的 epoch 秒；前端用
+            # (Date.now()/1000 - t0) 算出自己该显示哪一段。
+            t_off = time.time() - _WAVE_LEAD_SEC
+
+            # ---- ECG：由心率与每搏输出量驱动 ----
+            ecg_data = _ecg.generate_ecg(
+                hr=float(getattr(s, "hr", 72.0)),
+                sv=float(getattr(s, "sv", 82.0)),
+                rr=float(getattr(s, "rr", 16.0)),
+                seconds=win,
+                t_offset=t_off,
+            )
+
+            # ---- EEG：由睡眠阶段驱动；情绪接口预留未接线 ----
+            stage = str(getattr(s, "sleep_stage", "awake") or "awake")
+            if not bool(getattr(s, "sleeping", False)):
+                stage = "awake"
+            # 情绪通路：字段还没建，取默认中性。
+            # 将来 BodyState 加上 emotion_arousal / emotion_valence 后，
+            # 这里会自动开始读取，无需改本接口。
+            arousal = float(getattr(s, "emotion_arousal", 0.0) or 0.0)
+            valence = float(getattr(s, "emotion_valence", 0.0) or 0.0)
+            eeg_data = _eeg.generate_eeg(
+                stage=stage,
+                seconds=win,
+                arousal=arousal,
+                valence=valence,
+                t_offset=t_off,
+            )
+
+            return {
+                "ecg": ecg_data,
+                "eeg": eeg_data,
+                # 缓冲区第一个采样点的 epoch 秒。前端靠它把数据池对齐到墙钟，
+                # 从而在每次重新拉取时接上上一批的尾巴，而不是每 16 秒跳回开头。
+                "t0": round(t_off, 6),
+                "lead": _WAVE_LEAD_SEC,
+                "clock": {
+                    "time": _clock(s.hour),
+                    "day": self._body_sim_day(),
+                    "phase": phase(s.hour),
+                },
+                "disclaimer": "仿真波形，非医学数据，不可用于诊断",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"success": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+
     @API(name="webui_organs", description="内脏细则：心血管、呼吸、代谢、肾脏、消化道、内分泌、受体、体温与嗜好品", version="1", public=False)
     async def webui_organs(self, **kwargs: Any) -> dict[str, Any]:
         """返回分组后的全部器官字段。"""
@@ -1089,7 +1435,7 @@ class LifeBodyPlugin(MaiBotPlugin):
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
 
-    @API(name="webui_foods", description="食物库：23 项 FoodType 的份量与成分，以及三餐候选池", version="1", public=False)
+    @API(name="webui_foods", description="食物库：311 种食物的份量与成分（23 项 FoodType + 288 项扩展），以及三餐候选池", version="1", public=False)
     async def webui_foods(self, **kwargs: Any) -> dict[str, Any]:
         """返回只读食物表。"""
 
@@ -1176,9 +1522,15 @@ class LifeBodyPlugin(MaiBotPlugin):
         elif s.glucose > 7.8:
             parts.append(f"血糖偏高（{s.glucose:.1f} mmol/L）")
 
-        fasted = (s.t - s.last_meal_t) / H2S
+        # 最近一餐：这是最常被问到的一项，3 小时内才说，超过就当没这回事，
+        # 免得半夜还被当成"刚吃完"。用词跟 describe() 保持一致。
+        since_meal = (s.t - s.last_meal_t) / H2S
+        if getattr(s, "last_meal_items", "") and since_meal <= 3.0:
+            parts.append(f"刚吃了{s.last_meal_items}")
+
+        fasted = since_meal
         if s.hunger > 65:
-            parts.append(f"饿得厉害（已 {fasted:.1f} 小时没进食）")
+            parts.append(f"饿得厉害（{fasted:.0f} 小时没吃东西了）")
         elif s.hunger > 45:
             parts.append("有点饿")
 
@@ -1199,6 +1551,56 @@ class LifeBodyPlugin(MaiBotPlugin):
             + "；".join(parts)
             + "。说到自己状态时请以此为准，不要夸大也不要隐瞒。"
         )
+
+    @HookHandler(
+        "chat.receive.before_process",
+        name="body_wake_on_message",
+        description="入站消息到达：睡着时把她叫醒，或按配置直接拦下消息",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.EARLY,
+        error_policy=ErrorPolicy.SKIP,
+    )
+    async def on_incoming_message(self, **kwargs: Any) -> dict[str, Any] | None:
+        """消息到达时的睡眠联动。
+
+        两件事：
+          1. 睡着且开启了「消息唤醒」→ 叫醒她（唤醒后需连续安静若干分钟才重新入睡）
+          2. 睡着且开启了「睡眠中不响应」→ 中止这条消息，不让它进入后续链路
+
+        联动开启时这两项都交给麦生活的日程决定，本钩子不介入。
+        """
+
+        if not self._ready or self._engine is None:
+            return None
+
+        sleep_cfg = getattr(self.config, "sleep", None)
+        if sleep_cfg is None:
+            return None
+
+        # 联动开启 → 以麦生活日程为准，本钩子不做任何拦截或唤醒
+        link_on = bool(getattr(self.config.link, "enabled", False))
+
+        s = self._s
+        if not s.sleeping and not s.wake_pending:
+            return None
+
+        # 1) 拦截：睡眠中不响应消息
+        if (not link_on) and bool(getattr(sleep_cfg, "block_while_asleep", False)):
+            if s.sleeping:
+                self._get_logger().info("睡眠中拦下一条消息（睡眠中不响应已开启）")
+                return {
+                    "action": "abort",
+                    "reason": "麦麦正在睡觉，不处理消息",
+                }
+
+        # 2) 唤醒：来消息叫醒她
+        if (not link_on) and bool(getattr(sleep_cfg, "wake_on_message", False)):
+            if s.sleeping:
+                self._engine.wake_by_message()
+                self._get_logger().info("麦麦被消息唤醒，%.0f 分钟内保持清醒",
+                                        float(getattr(sleep_cfg, "wake_hold_minutes", 10.0)))
+
+        return None
 
     @HookHandler(
         "maisaka.planner.before_request",
@@ -1252,9 +1654,13 @@ class LifeBodyPlugin(MaiBotPlugin):
 
     @Tool(
         "body_state",
-        description="查询麦麦此刻的身体状态：体征、体感与最近的活动",
+        description="查询麦麦此刻的身体状态：体征、体感、最近的活动与吃下去的东西",
         brief_description="查麦麦的身体",
-        detailed_description="返回一段可以直接读的身体自述和一行紧凑摘要，适合在聊天里关心对方身体时调用。",
+        detailed_description=(
+            "返回一段可以直接读的身体自述和一行紧凑摘要。"
+            "适合在聊天里关心对方身体时调用；"
+            "被问到「你吃了什么」「饿不饿」「身体怎么样」时都应该调它。"
+        ),
         parameters=[
             ToolParameterInfo(name="detail", param_type=ToolParamType.BOOLEAN,
                               description="是否返回详尽版自述", required=False, default=True),
@@ -1408,7 +1814,10 @@ class LifeBodyPlugin(MaiBotPlugin):
         if not stream_id:
             return False
         try:
-            html_text = build_html(self._s)
+            html_text = build_html(
+                self._s,
+                cycle_enabled=bool(getattr(self.config.cycle, "enabled", False)),
+            )
         except Exception as exc:  # 快照缺字段等构造期问题
             self.ctx.logger.warning("身体卡片 HTML 构建失败，退回文字: %s", exc)
             return False

@@ -10,6 +10,7 @@
 import math
 import random
 import time
+from datetime import date as _date, datetime as _datetime
 from .state import BodyState, clamp
 from .events import Event, EventBus
 from . import food
@@ -199,6 +200,9 @@ class BodyEngine:
 
         self._circadian()
         self._sleep(dt)
+        self._menstrual(dt)
+        self._exercise_tick(dt)
+        self._update_habit(dt)
         self._behaviour(dt)
         self._autonomic(dt)
         self._cardio(dt)
@@ -231,45 +235,700 @@ class BodyEngine:
             return hour >= a or hour < b
         return a <= hour < b
 
+    # 一个 NREM-REM 周期约 90 分钟。整夜前半段深睡占比高、后半段 REM 变多，
+    # 这是健康成人睡眠结构的普遍规律（PSG 实测）。
+    SLEEP_CYCLE_MIN = 90.0
+
+    # 周期内各阶段的相对占比（浅睡 / 深睡 / REM）。周期序号越大，深睡越少、
+    # REM 越多 —— 用两组系数在 cycle_profile() 里按周期线性插值。
+    _CYCLE_PROFILE_EARLY = (0.55, 0.35, 0.10)   # 第一个周期：浅/深/REM
+    _CYCLE_PROFILE_LATE = (0.60, 0.10, 0.30)    # 第 4+ 个周期：深睡几乎消失
+
+    def cycle_profile(self, index: int) -> tuple:
+        """按周期序号给出 (浅睡, 深睡, REM) 的时长占比。
+
+        前 4 个周期线性插值，之后固定为 LATE，避免后半段深睡变负。
+        """
+        t = min(1.0, max(0.0, index / 3.0))
+        a = self._CYCLE_PROFILE_EARLY
+        b = self._CYCLE_PROFILE_LATE
+        return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
+
     def _sleep(self, dt):
-        """维护睡眠深度。
+        """维护睡眠深度与四态睡眠周期。
 
         旧实现把睡眠完全外包给 link_sleep，而部署配置没有 [link] 段，
         这个值恒为 0 —— 于是 24 小时都按清醒代谢：夜间照常口渴喝水、
         膀胱到 300 mL 就起夜、交感张力不下调。真人 6-9 小时连续睡眠里
         基本不饮水、起夜 0-1 次，夜间心率血压体温同步下移。
 
-        现在改成引擎自持：落入窗口就入睡（一阶趋近，约 5 分钟完成过渡），
-        窗口内若被外部 link_activity 打断则醒来。外部 link_sleep 给非零值时
-        以外部为准，保持与麦生活日程的兼容。
+        2026-11-14：在原有「窗口 + 深度」之上叠加四态分期
+        （awake / light / deep / rem），一个周期 90 分钟，整夜 4~6 个。
+        sleep_depth 不再直接由 target 驱动，而是由当前阶段派生，
+        这样原有 6 处耦合（交感、体温、饮水、进食、憋尿、排便）无需改动。
         """
         s = self.s
-        target = 1.0 if self._in_sleep_window(s.hour) else 0.0
-        # 外部联动优先：麦生活说在睡就以它为准，说在活动就别睡
-        if self.link_enabled:
+        in_window = self._in_sleep_window(s.hour)
+
+        # ---- 连续清醒计时 ----
+        # 醒着就累加，睡着就归零。用于判断是否该强制入睡。
+        if s.sleeping:
+            s.awake_hours = 0.0
+        else:
+            s.awake_hours += dt / H2S
+
+        # ---- 长时间不睡的即时欠债 ----
+        # 2026-11-14 修：旧实现只在「睡眠窗口内清醒」时累积债，
+        # 于是把睡眠窗口设成空（模拟一直不睡）时，债恒为 0 ——
+        # 连续 19 小时不睡一点都不欠债，这显然不对。
+        # 真实机制：只要超过一个正常清醒日（约 16 小时）就该开始欠债，
+        # 与他几点睡、窗口怎么设无关。
+        if not s.sleeping and s.awake_hours > 16.0:
+            s.sleep_debt = clamp(s.sleep_debt + dt / H2S, 0.0, 48.0)
+
+        # ---- 强制睡眠 / 微睡眠（2026-11-14 新增）----
+        # 依据 [R6] Durmer & Dinges 2005：连续清醒越久，
+        # "microsleeps / sleep attacks" 出现频率越高，且不可用意志抵抗。
+        # 建模为两级：
+        #   连续清醒 > force_sleep_after_hours（默认 20h）→ 强制入睡，
+        #       且无视睡眠窗口（站着也能睡着）
+        #   强制入睡持续 force_sleep_hours（默认 6h）后解除
+        # 这不是"建议"，是生理性的——所以放在 want_sleep 之前直接覆盖。
+        if not s.forced_sleep and s.awake_hours >= float(self.force_sleep_after_hours):
+            s.forced_sleep = True
+            s.forced_sleep_at = s.t
+            s.microsleep_count += 1
+            self.bus.emit(Event(s.t, "forced_sleep", "critical",
+                                f"连续清醒 {s.awake_hours:.0f} 小时，撑不住睡过去了",
+                                {"awake_h": round(s.awake_hours, 1),
+                                 "count": s.microsleep_count}))
+        elif s.forced_sleep and s.sleeping and s.awake_hours <= 0.0:
+            # awake_hours 在睡着时归零；用一个单独计时判断强制睡眠是否结束
+            pass
+
+        if s.forced_sleep:
+            elapsed_sleep = s.t - float(getattr(s, "forced_sleep_at", 0.0) or s.t)
+            if elapsed_sleep >= float(self.force_sleep_hours) * H2S:
+                s.forced_sleep = False
+                self.bus.emit(Event(s.t, "forced_sleep_end", "info",
+                                    "补够了觉，终于自然醒来", {}))
+
+        # ---- 是否应该睡（外部联动优先）----
+        want_sleep = 1.0 if in_window else 0.0
+        if s.forced_sleep:
+            # 强制睡眠优先级高于一切：不看在不在窗口、不看联动
+            want_sleep = 1.0
+        elif self.link_enabled:
             if self.link_sleep >= 0.0:
                 # 外部明确表态就完全听它的：说清醒（0.0）就是清醒，
                 # 不要因为"没到窗口"或"窗口到了"再改回去。
-                target = min(1.0, self.link_sleep)
+                want_sleep = min(1.0, self.link_sleep)
             elif self.link_activity > 0.6:
-                target = 0.0
-        s.sleep_depth = approach_tau(s.sleep_depth, target, dt, 300.0)
-        was = s.sleeping
-        s.sleeping = s.sleep_depth > 0.5
+                want_sleep = 0.0
 
-        if s.sleeping and not was:
-            s.last_sleep_t = s.t
-            self.bus.emit(Event(s.t, "sleep_start", "info", "睡着", {}))
-        elif was and not s.sleeping:
-            # 睡够 6 h 以上才还得掉债，否则只是打了个盹
-            slept_h = (s.t - s.last_sleep_t) / H2S
-            s.sleep_debt = clamp(s.sleep_debt - max(0.0, slept_h - 1.0) * 0.8, 0.0, 48.0)
-            self.bus.emit(Event(s.t, "sleep_end", "info", "醒来",
-                                {"slept_h": round(slept_h, 2)}))
+        was_sleeping = s.sleeping
 
-        # 睡眠债：清醒且处于窗口内（本该睡）时累积
-        if not s.sleeping and self._in_sleep_window(s.hour):
+        # ---- 生理性唤醒：渴醒 / 憋尿醒 ----
+        # 「睡着的她不会起夜」是旧实现刻意做的简化，但真实人夜里会因为
+        # 极度口渴或膀胱过满而醒。这里把这两个事件接进唤醒计数，
+        # 同时把睡眠打断成「清醒一小段，再重新从浅睡入睡」。
+        if s.sleeping and not s.wake_pending:
+            if s.thirst > 88.0:
+                self._wake_up("thirst", "渴醒")
+            elif s.bladder > 550.0:
+                self._wake_up("bladder", "憋尿醒")
+
+        # ---- 唤醒后等待重新入睡 ----
+        # 被叫醒后要连续安静一段时间才重新睡回去，期间再来消息重新计时。
+        # 注意：唤醒是即时生效的（sleeping 立刻置 False），否则 _advance_stage
+        # 会在同一拍把深度推回 0.55 以上，导致"刚被叫醒又睡回去"。
+        if s.wake_pending:
+            hold = max(0.0, self.wake_hold_minutes) * 60.0
+            if s.t - s.wake_since >= hold:
+                # 安静够了，允许重新入睡。清除标记，走正常入睡流程。
+                s.wake_pending = False
+                # 重新入睡从浅睡周期的起点开始
+                s.stage_index = 0
+                s.stage_elapsed = 0.0
+                s.cycle_pos = 0.0
+            else:
+                # 仍然清醒：强制保持清醒态，累计清醒时长
+                s.sleeping = False
+                s.sleep_stage = "awake"
+                s.sleep_depth = approach_tau(s.sleep_depth, 0.0, dt, 60.0)
+                s.dur_awake += dt
+                return
+
+        # ---- 入睡 / 醒来：带一段过渡（不抖动）----
+        # 入睡时间常数受核心体温调制：真实机制是核心体温必须下降约 0.3℃ 才
+        # 容易入睡，黄体期基础体温偏高会推迟入睡（0.3~0.5℃ 约推迟 20~40 分钟）。
+        # 基准 300 秒（约 5 分钟），体温每高 0.1℃ 增加 60 秒，上限 1200 秒。
+        onset_tau = 300.0 + max(0.0, (s.temp - 36.8)) * 600.0
+        onset_tau = min(1200.0, onset_tau)
+        if want_sleep > 0.5 and not was_sleeping:
+            # 入睡过程：一阶趋近，到 0.5 判定睡着
+            s.sleep_depth = approach_tau(s.sleep_depth, 1.0, dt, onset_tau)
+            if s.sleep_depth > 0.5:
+                resumed = s.sleep_onset_t > 0.0 and s.wake_count > 0
+                s.sleeping = True
+                # 重新入睡一律从浅睡开始；首次入睡同样从浅睡
+                s.stage_index = 0
+                s.stage_elapsed = 0.0
+                s.cycle_pos = 0.0
+                s.sleep_stage = "light"
+                if not resumed:
+                    # 全新的一个夜晚：清零累计
+                    s.dur_light = s.dur_deep = s.dur_rem = s.dur_awake = 0.0
+                    s.wake_count = 0
+                    s.wake_by_message = s.wake_by_thirst = s.wake_by_bladder = 0
+                    s.sleep_onset_t = s.t
+                s.last_sleep_t = s.last_sleep_t or s.t
+                self.bus.emit(Event(s.t, "sleep_start", "info",
+                                    "重新入睡" if resumed else "睡着",
+                                    {"stage": "light"}))
+        elif want_sleep <= 0.5 and was_sleeping:
+            # 醒来过程
+            s.sleep_depth = approach_tau(s.sleep_depth, 0.0, dt, 300.0)
+            if s.sleep_depth <= 0.5:
+                s.sleeping = False
+                s.sleep_stage = "awake"
+                self._settle_sleep()
+                s.sleep_onset_t = 0.0
+        else:
+            # 保持当前状态，按阶段推进深度
+            if s.sleeping:
+                self._advance_stage(dt)
+            else:
+                s.sleep_depth = approach_tau(s.sleep_depth, 0.0, dt, 300.0)
+
+        # ---- 睡眠债累积 ----
+        # 2026-11-14 重写。旧实现只在「睡眠窗口内且清醒」时累积，
+        # 于是「每天 3 点睡 5 点起」这种情况债几乎不涨（20 天才 1 小时）——
+        # 因为绝大部分时间根本不在窗口内。这与现实不符：一个每天只睡 2 小时
+        # 的人，债务是持续累积的，跟他几点睡无关。
+        #
+        # 新口径：以「每晚所需睡眠」为基准，睡得不够就按缺口累积。
+        #   每晚基准 sleep_need_h 小时（默认 7.5）
+        #   每个 24 小时周期结束时结算：缺口 = max(0, 基准 - 实际睡)
+        # 这样无论几点睡、睡多久，只要总量不够就会持续欠债。
+        #
+        # 同时保留「窗口内清醒」的即时累积，用于捕捉「该睡不睡」的短期债。
+        if not s.sleeping and in_window:
             s.sleep_debt = clamp(s.sleep_debt + dt / H2S, 0.0, 48.0)
+
+    # ------------------------------------------------------------------
+    # 日程驱动的运动（2026-11-14）
+    # ------------------------------------------------------------------
+    exercise_enabled: bool = True
+    exercise_max_minutes: float = 45.0
+    exercise_interval_minutes: float = 15.0
+    # 运动所需的最低有效精力（含睡眠债扣分后）。默认 55：
+    # 要"精神不错"才去跑，而不是"还没死"就去跑。
+    exercise_min_energy: float = 55.0
+    # 昨晚睡眠低于这个小时数就不运动（熬夜次日不该晨跑）
+    exercise_min_sleep_hours: float = 6.0
+
+    # 不适合运动的身体/环境条件。返回拒绝原因，空串表示可以运动。
+    def exercise_block_reason(self) -> str:
+        """判断现在能不能运动。麦生活的日程是 LLM 编的，
+        外面暴晒/刮风/正在痛经时硬跑没道理，所以这里做一次否决。"""
+
+        s = self.s
+        if s.hospital_until > s.t:
+            return "正在住院"
+        if s.health < 45.0:
+            return f"身体太虚（健康 {s.health:.0f}）"
+        if s.pain > 35.0:
+            return f"正在疼痛（{s.pain:.0f}/100），不适合运动"
+        # DOMS 期间肌肉微损伤未修复，继续运动会加重（[R3] Cheung 2003 明确
+        # 建议 DOMS 后 1-2 天降低强度）。这里用 30 分做门槛。
+        if float(getattr(s, "doms", 0.0) or 0.0) > 30.0:
+            return f"肌肉还在酸痛（{s.doms:.0f}/100），需要恢复"
+        if s.sleeping:
+            return "正在睡觉"
+        # 环境：只在室外时才拦。室内有空调暖气，外面天气不构成理由。
+        if not bool(getattr(s, "env_indoor", True)):
+            load = clamp(float(getattr(s, "env_load", 0.0) or 0.0), 0.0, 1.0)
+            if load >= 0.70:
+                feels = float(getattr(s, "env_feels_c", 22.0) or 22.0)
+                return f"室外体感 {feels:.0f}℃ 太极端，不适合出门运动"
+            wind = float(getattr(s, "env_wind_ms", 0.0) or 0.0)
+            if wind >= 10.0:
+                return f"室外风太大（{wind:.0f} m/s）"
+        if s.thirst > 85.0:
+            return "严重缺水"
+
+        # ---- 精力门槛（2026-11-14 调高）----
+        # 旧阈值 25 太低：那已经接近"走两步就喘"的水平，根本跑不动。
+        # 真实运动需要较好的状态，尤其熬夜后第二天不该去跑步。
+        # 门槛用「有效精力」而不是裸 energy：熬夜欠的睡眠债要折算进扣分。
+        eff_energy = float(s.energy) - self._sleep_debt_penalty()
+        need = max(10.0, float(self.exercise_min_energy))
+        if eff_energy < need:
+            if self._sleep_debt_penalty() > 0.0:
+                return (f"精力不足（{eff_energy:.0f}/100，含睡眠债扣 "
+                        f"{self._sleep_debt_penalty():.0f}），不适合运动")
+            return f"精力不足（{eff_energy:.0f}/100，需要 {need:.0f} 以上）"
+
+        # 睡得太少也不该运动：连续熬夜后即使 energy 显示尚可，
+        # 身体实际恢复不足。以昨晚睡眠时长做二次确认。
+        last_sleep_h = float(getattr(s, "last_sleep_hours", 0.0) or 0.0)
+        if last_sleep_h > 0.0 and last_sleep_h < float(self.exercise_min_sleep_hours):
+            return f"昨晚只睡了 {last_sleep_h:.1f} 小时，不适合运动"
+        return ""
+
+    def _sleep_debt_penalty(self) -> float:
+        """睡眠债折算成精力扣分。
+
+        睡眠债 1 小时 ≈ 扣 4 点有效精力，上限扣 25 点。
+        依据：连续两晚少睡 2 小时，主观精力明显下降是常识性结论，
+        具体系数是估算值（无文献）。
+        """
+
+        debt = max(0.0, float(getattr(self.s, "sleep_debt", 0.0) or 0.0))
+        return min(25.0, debt * 4.0)
+
+    def _update_habit(self, dt):
+        """运动习惯随时间衰减，运动时提升。
+
+        重复运动效应 [R5]：一次运动后即产生保护，但保护会随时间消退
+        （文献未给精确消退速率，这里按 14 天衰减完估算）。
+        """
+
+        s = self.s
+        # 每天衰减 1/14
+        decay = dt / (14.0 * 24.0 * H2S)
+        s.exercise_habit = clamp(s.exercise_habit - decay, 0.0, 1.0)
+        # 运动中持续提升
+        if s.exercising:
+            s.exercise_habit = clamp(s.exercise_habit + dt / (6.0 * H2S), 0.0, 1.0)
+
+    def _fatigue_factor(self) -> float:
+        """当前疲劳度 0~1。越高表示越撑不住。
+
+        三个来源合成（各自归一到 0~1 后加权）：
+          1. 本段运动已进行时间 —— 跑了 40 分钟当然比跑了 10 分钟累
+          2. 精力消耗 —— energy 越低越累
+          3. 乳酸累积 —— 6 mmol/L 以上开始明显影响发力
+        """
+
+        s = self.s
+        elapsed_min = max(0.0, (s.t - float(getattr(s, "exercise_start_t", s.t)))) / 60.0
+        # 时间项：以 60 分钟为满，但前 20 分钟增长慢（有氧系统还没吃紧）
+        t_term = min(1.0, (elapsed_min / 60.0) ** 0.8)
+
+        # 精力项：energy 从 80 掉到 20 视为完全疲劳
+        e_now = float(getattr(s, "energy", 80.0) or 80.0)
+        e_term = clamp((80.0 - e_now) / 60.0, 0.0, 1.0)
+
+        # 乳酸项：1~8 mmol/L 线性映射（8 已是相当高的血乳酸）
+        lac = float(getattr(s, "lactate", 1.0) or 1.0)
+        l_term = clamp((lac - 2.0) / 6.0, 0.0, 1.0)
+
+        return clamp(0.45 * t_term + 0.30 * e_term + 0.25 * l_term, 0.0, 1.0)
+
+    def _jitter(self, base_sec: float, ratio: float) -> float:
+        """在 base 的 ±ratio 范围内随机取一个时长（秒）。
+
+        用引擎自己的 rng，好处是同一个 seed 下仿真可复现，便于回归测试。
+        """
+
+        base = max(0.0, float(base_sec))
+        if base <= 0.0:
+            return 180.0
+        lo = base * (1.0 - max(0.0, min(0.9, ratio)))
+        hi = base * (1.0 + max(0.0, min(0.9, ratio)))
+        try:
+            return float(self.rng.uniform(lo, hi))
+        except Exception:
+            import random as _r
+            return float(_r.uniform(lo, hi))
+
+    def request_exercise(self, level: str, duration_min: float = 30.0) -> bool:
+        """外部（日程）请求运动。返回是否接受。
+
+        接受后不是立刻开始跑：由 _exercise_tick 按间歇节奏驱动，
+        跑一段歇一段，直到 duration_min 到点或身体条件变差。
+        """
+
+        s = self.s
+        if not self.exercise_enabled or not level:
+            return False
+        reason = self.exercise_block_reason()
+        if reason:
+            s.exercise_refused = reason
+            return False
+        cap = max(5.0, float(self.exercise_max_minutes))
+        minutes = min(max(5.0, float(duration_min)), cap)
+        s.exercise_intent = level
+        s.exercise_until = s.t + minutes * 60.0
+        # 强度决定间歇：高强度跑短歇长，中等反过来
+        base = max(5.0, float(self.exercise_interval_minutes)) * 60.0
+        if level == "high":
+            s.exercise_on_phase = base
+            s.exercise_off_phase = base * 0.4
+        else:
+            s.exercise_on_phase = base * 1.2
+            s.exercise_off_phase = base * 0.3
+        # 每次循环的时长不是定值：真实跑步每一段的配速、休息长短都不同。
+        # 这里只给基准值，具体时长在 _exercise_tick 每次换相位时重新抽。
+        s.exercise_cycle_t = 0.0
+        s.exercising = True
+        s.exercise_refused = ""
+        s.exercise_start_t = s.t
+        s.last_exercise_t = s.t
+        s._next_phase_change = s.t + s.exercise_on_phase
+        self.bus.emit(Event(s.t, "exercise_start", "info",
+                            f"开始运动（{level}）",
+                            {"level": level, "minutes": round(minutes, 1)}))
+        return True
+
+    def _trigger_doms(self) -> None:
+        """运动结束后按运动量与习惯触发 DOMS。
+
+        依据 [R5] 重复运动效应：首次做某类运动酸痛最重，之后显著减轻。
+        这里用 exercise_habit 表示"最近是否常运动"：
+          habit = 0（很久没动）→ 全额 DOMS
+          habit = 1（天天动）   → 只剩 30%
+        """
+
+        s = self.s
+        # 运动量：以"跑了多少分钟 × 强度"估算
+        elapsed_min = max(0.0, (s.t - float(getattr(s, "exercise_start_t", s.t)))) / 60.0
+        if elapsed_min < 8.0:
+            return          # 太短，不构成 DOMS 刺激
+        level = str(s.exercise_intent or "mid")
+        intensity = 1.0 if level == "high" else 0.65
+        # 基础峰值：30 分钟高强度约 55 分酸痛
+        base = clamp(elapsed_min / 30.0 * 55.0 * intensity, 0.0, 85.0)
+        # 重复运动效应：习惯越好，酸痛越轻（文献 SMD 0.51-1.23）
+        habit = clamp(float(getattr(s, "exercise_habit", 0.0) or 0.0), 0.0, 1.0)
+        peak = base * (1.0 - 0.70 * habit)
+        if peak < 5.0:
+            return
+        # 峰值出现在运动后 48h
+        s.doms_from_exercise = peak
+        s.doms_peak_at = s.t + 48.0 * H2S
+        self.bus.emit(Event(s.t, "doms", "info",
+                            "运动后肌肉开始酸痛（48 小时后达峰）",
+                            {"peak": round(peak, 1), "habit": round(habit, 2)}))
+
+    def _exercise_tick(self, dt):
+        """推进间歇式运动：跑一段、歇一段，到点结束。"""
+
+        s = self.s
+        if not s.exercise_intent:
+            return
+        if s.t >= s.exercise_until:
+            self._trigger_doms()
+            s.exercising = False
+            s.exercise_intent = ""
+            s.exercise_until = 0.0
+            s.exercise_cycle_t = 0.0
+            s.last_exercise_t = s.t
+            self.bus.emit(Event(s.t, "exercise_end", "info", "运动结束", {}))
+            return
+
+        # 运动过程中身体变差（太渴/太累/开始痛）就提前收工
+        if s.exercising and (s.thirst > 90.0 or s.energy < 12.0 or s.pain > 60.0):
+            s.exercising = False
+            s.exercise_refused = "身体撑不住，提前结束"
+            self.bus.emit(Event(s.t, "exercise_end", "info", "身体撑不住，提前结束", {}))
+
+        s.exercise_cycle_t += dt
+
+        # ---- 随机化间歇 + 疲劳调制 ----
+        # 旧实现用固定 on/off 相位循环，于是每段跑步都是精确的 15 分钟、
+        # 每次休息都是精确的 6 分钟 —— 太机械。真实跑步的段长与配速本来就
+        # 在波动（身体状态、路面、心情），所以每次换相位时重新抽一次时长。
+        #
+        # 2026-11-14 加入疲劳：越到后面跑得越短、歇得越长。疲劳度由三个量
+        # 合成 —— 本段运动已进行时间、精力消耗、乳酸累积。
+        # 这符合真实感受：跑了 40 分钟后，第 5 段撑不到第 1 段那么久。
+        next_change = float(getattr(s, "_next_phase_change", 0.0) or 0.0)
+        fatigue = self._fatigue_factor()
+
+        # 疲劳到顶就直接收工，不要拖出「跑 1 分钟」这种碎片段。
+        # 真实感受也是这样：真的跑不动了就结束，不会勉强挪两下。
+        if fatigue >= 0.85:
+            self._trigger_doms()
+            s.exercising = False
+            s.exercise_intent = ""
+            s.exercise_until = 0.0
+            s.exercise_cycle_t = 0.0
+            s.last_exercise_t = s.t
+            s.exercise_refused = ""
+            self.bus.emit(Event(s.t, "exercise_end", "info",
+                                "太累了，结束运动", {"fatigue": round(fatigue, 2)}))
+            return
+
+        if next_change > 0.0 and s.t >= next_change:
+            if s.exercising:
+                # 这次跑够了，进入休息：疲劳越高歇得越久
+                s.exercising = False
+                base = s.exercise_off_phase * (1.0 + 0.80 * fatigue)
+                dur = self._jitter(base, 0.35)
+            else:
+                # 休息够了开始下一段：疲劳越高这段越短
+                base = s.exercise_on_phase * max(0.40, 1.0 - 0.60 * fatigue)
+                dur = self._jitter(base, 0.30)
+                # 边界检查：如果这段跑不完就被窗口截断，就别开了。
+                # 旧实现在剩 90 秒时还开一段，产出「跑 1 分 / 歇 0 分」的碎片。
+                remain = s.exercise_until - s.t
+                if dur > remain * 0.55:
+                    self._trigger_doms()
+                    s.exercising = False
+                    s.exercise_intent = ""
+                    s.exercise_until = 0.0
+                    s.exercise_cycle_t = 0.0
+                    s.last_exercise_t = s.t
+                    self.bus.emit(Event(s.t, "exercise_end", "info",
+                                        "时间差不多了，结束运动",
+                                        {"fatigue": round(fatigue, 2)}))
+                    return
+                s.exercising = True
+                self.bus.emit(Event(s.t, "exercise_rep", "debug",
+                                    "开始新一段",
+                                    {"phase_s": round(dur),
+                                     "fatigue": round(fatigue, 2)}))
+            s.last_exercise_t = s.t
+            s._next_phase_change = s.t + max(180.0, dur)
+        elif next_change <= 0.0:
+            # 兼容没有初始化的情况
+            s.exercising = True
+            s._next_phase_change = s.t + self._jitter(s.exercise_on_phase, 0.30)
+
+    # ------------------------------------------------------------------
+    # 睡眠分期
+    # ------------------------------------------------------------------
+    # 各阶段对「睡眠深度」的贡献，用于驱动原有生理耦合：
+    #   浅睡 0.55（交感仍部分活跃，易被唤醒）
+    #   深睡 1.00（副交感主导，心率血压体温最低）
+    #   REM  0.35（脑活跃但肌张力消失，自主神经不稳定）
+    STAGE_DEPTH = {"awake": 0.0, "light": 0.55, "deep": 1.00, "rem": 0.35}
+
+    # ------------------------------------------------------------------
+    # 觉醒
+    # ------------------------------------------------------------------
+    # 月经周期总开关与参数，由插件从配置注入。默认关闭。
+    cycle_enabled: bool = False
+    cycle_length_days: float = 28.0
+    cycle_pain_enabled: bool = True
+    # 现实日历锚点（date 或 None）。由配置 cycle.last_period_date 解析后注入。
+    # 为 None 时沿用旧行为：从启用那一刻开始累加仿真天数，零点是身体自己的纪年，
+    # 与现实日期无关。有锚点时改为「今天 - 上次月经首日」，直接对实现实日历。
+    cycle_anchor_date = None
+    # 改锚点后跳过下一次回绕检测：否则「昨天填上月、今天改成上周」会让
+    # day 突然倒退，被误判成跨过周期末，凭空发一条「新一轮开始」。
+    _cycle_skip_wrap_once = False
+
+    # 每晚所需睡眠小时数，用于结算睡眠债缺口。默认 7.5。
+    sleep_need_hours: float = 7.5
+    # 连续清醒超过这个小时数就强制入睡（微睡眠）。默认 20 小时。
+    # 依据 [R6]：微睡眠随睡眠剥夺加剧出现。10-20 小时是常见区间，
+    # 取 20 是保守值（现实中 24 小时不睡已明显出现 microsleep）。
+    force_sleep_after_hours: float = 20.0
+    # 强制入睡持续多久才解除。默认 6 小时（一次补偿性长睡）。
+    force_sleep_hours: float = 6.0
+    # 强制睡眠期间能否被消息叫醒。默认 True（现实里大声喊是能叫醒的），
+    # 但醒来状态很差。设为 False 则任何人都叫不醒，只能等自然醒。
+    force_sleep_wakeable: bool = True
+
+    # 唤醒等待时长（分钟），由插件从配置注入。默认 10 分钟。
+    wake_hold_minutes: float = 10.0
+    # 是否允许被消息唤醒。插件从配置注入；联动开启时会被置 False。
+    wake_on_message: bool = True
+
+    def _wake_up(self, reason: str, label: str) -> None:
+        """记一次唤醒并按来源计数。
+
+        唤醒后不清零整夜累计 —— 这仍然是同一夜，只是中间醒了一次。
+        重新入睡时 stage_index 归零，从浅睡重新开始一个周期。
+        """
+        s = self.s
+        s.wake_count += 1
+        if reason == "message":
+            s.wake_by_message += 1
+        elif reason == "thirst":
+            s.wake_by_thirst += 1
+        elif reason == "bladder":
+            s.wake_by_bladder += 1
+        s.wake_since = s.t
+        s.wake_pending = True
+        s.last_wake_reason = label
+        self.bus.emit(Event(s.t, "wake", "info", f"夜间唤醒：{label}",
+                            {"reason": reason, "count": s.wake_count}))
+
+    def wake_by_message(self) -> None:
+        """外部（插件消息钩子）通知：来消息了，叫她一声。
+
+        是否真的唤醒由 wake_on_message 决定；联动开启时插件不会调用本方法。
+        """
+        s = self.s
+        if not self.wake_on_message:
+            return
+        if not s.sleeping:
+            return
+
+        # ---- 强制睡眠（微睡眠）的可叫醒性 ----
+        # 连续清醒 20 小时后睡过去，那不是普通小睡，是身体撑不住。
+        # 但现实里大声喊、推搡还是能叫醒的 —— 只是醒来后状态很差。
+        # 由 force_sleep_wakeable 控制（默认开）。
+        if s.forced_sleep:
+            if not bool(getattr(self, "force_sleep_wakeable", True)):
+                # 开关关闭：叫不醒，消息只能干等
+                s.last_wake_reason = "强制睡眠中，叫不醒"
+                return
+            # 可叫醒：结束强制睡眠状态，并留一次很重的唤醒记录
+            s.forced_sleep = False
+            s.forced_sleep_at = 0.0
+            self._wake_up("message", "被硬叫醒（强撑着）")
+            # 被叫醒后状态很差：强制拉低精力、抬高压力的感受
+            s.energy = clamp(s.energy - 12.0, 10.0, 100.0)
+            self.bus.emit(Event(s.t, "forced_wake", "warn",
+                                "被强行叫醒，脑子还很糊",
+                                {"awake_h": round(s.awake_hours, 1)}))
+            return
+
+        self._wake_up("message", "来消息")
+
+    def _advance_stage(self, dt):
+        """推进四态分期。一个周期 90 分钟，按 cycle_profile 分配三段时长。"""
+        s = self.s
+        s.stage_elapsed += dt
+
+        cycle_sec = self.SLEEP_CYCLE_MIN * 60.0
+        light_frac, deep_frac, rem_frac = self.cycle_profile(s.stage_index)
+
+        # 月经周期对睡眠结构的影响（真实且显著）：
+        #   黄体后期（PMS 期）—— 核心体温升高 0.3~0.5℃ 延迟入睡、深睡减少、
+        #   夜间觉醒增多（真实研究中深睡可减少 20~30%）。
+        #   行经期 —— 前列腺素致痛与不适，入睡更浅。
+        # 这里把深睡占比按 pms/pain 压缩，压缩部分转给浅睡；REM 基本不变
+        # （REM 受激素影响小于 NREM 深睡，与文献一致）。
+        penalty = 0.0
+        if s.pms_load > 0.0:
+            penalty += 0.30 * clamp(s.pms_load, 0.0, 1.0)   # 最多压 30% 深睡
+        if s.pain > 20.0:
+            penalty += 0.15 * clamp((s.pain - 20.0) / 60.0, 0.0, 1.0)
+        penalty = clamp(penalty, 0.0, 0.45)
+        if penalty > 0.0:
+            moved = deep_frac * penalty
+            deep_frac -= moved
+            light_frac += moved
+        # 每个周期内部固定顺序：浅睡 → 深睡 → 浅睡 → REM
+        # （两次浅睡合计 light_frac，中间插一段深睡，最后进 REM）
+        seg_light_a = cycle_sec * light_frac * 0.5
+        seg_deep = cycle_sec * deep_frac
+        seg_light_b = cycle_sec * (light_frac * 0.5 + rem_frac * 0.0)
+        seg_rem = cycle_sec * rem_frac
+
+        # 周期内位置（0..1），用于外部展示
+        s.cycle_pos = min(1.0, s.stage_elapsed / cycle_sec)
+
+        # 判定当前阶段应处于哪一段
+        if s.stage_elapsed < seg_light_a:
+            new_stage = "light"
+        elif s.stage_elapsed < seg_light_a + seg_deep:
+            new_stage = "deep"
+        elif s.stage_elapsed < seg_light_a + seg_deep + seg_light_b:
+            new_stage = "light"
+        else:
+            new_stage = "rem"
+
+        # 累计时长
+        if new_stage == "light":
+            s.dur_light += dt
+        elif new_stage == "deep":
+            s.dur_deep += dt
+        else:
+            s.dur_rem += dt
+
+        if new_stage != s.sleep_stage:
+            self.bus.emit(Event(s.t, "sleep_stage", "debug", "睡眠分期",
+                                {"from": s.sleep_stage, "to": new_stage,
+                                 "cycle": s.stage_index}))
+            s.sleep_stage = new_stage
+
+        # 深度跟随阶段，但不硬切（30 秒一阶过渡，避免心率阶跃）
+        s.sleep_depth = approach_tau(s.sleep_depth,
+                                     self.STAGE_DEPTH.get(new_stage, 0.0),
+                                     dt, 30.0)
+
+        # 周期结束 → 下一周期
+        if s.stage_elapsed >= cycle_sec:
+            s.stage_index += 1
+            s.stage_elapsed = 0.0
+            s.cycle_pos = 0.0
+
+    def _settle_sleep(self):
+        """醒来结算：算睡眠质量，按质量还睡眠债。"""
+        s = self.s
+        total = s.dur_light + s.dur_deep + s.dur_rem
+        if total <= 0.0:
+            return
+
+        total_h = total / H2S
+        s.last_sleep_hours = total_h   # 供运动门槛判断"昨晚睡够没有"
+        deep_r = s.dur_deep / total
+        rem_r = s.dur_rem / total
+        awake_h = s.dur_awake / H2S
+
+        # 质量评分（0~100）：
+        #   时长分（满分 40）—— 7~9 h 最佳，少于 6 h 明显扣分
+        #   深睡分（满分 30）—— 健康区间 20~25%，偏离线性扣分
+        #   REM 分（满分 20）—— 健康区间 20~25%
+        #   连续性（满分 10）—— 中途清醒越少越高
+        if total_h >= 7.0:
+            dur_score = 40.0
+        elif total_h >= 6.0:
+            dur_score = 40.0 * (total_h - 5.0) / 2.0
+        else:
+            dur_score = max(0.0, 40.0 * (total_h - 4.0) / 2.0)
+
+        deep_score = 30.0 * max(0.0, 1.0 - abs(deep_r - 0.225) / 0.225)
+        rem_score = 20.0 * max(0.0, 1.0 - abs(rem_r - 0.225) / 0.225)
+        cont_score = 10.0 * max(0.0, 1.0 - awake_h * 2.0)
+
+        s.sleep_quality = clamp(dur_score + deep_score + rem_score + cont_score,
+                                0.0, 100.0)
+
+        # 还债：以睡眠质量为核心，不是只看时长。
+        # 2026-11-14 修：旧实现 eff = min(1, quality/80) 上限封顶，
+        # 于是质量 95 和质量 80 的还债速度完全一样 —— 质量实际上没起作用。
+        # 改为「恢复效率」：把整夜睡出来的有效恢复折算成"等效睡眠小时"。
+        #
+        # 恢复效率 = 时长 × 质量系数
+        #   质量系数 = 0.4 + 0.6 × (quality/100)
+        #   即：质量 100 → 系数 1.0（一小时顶一小时）
+        #       质量 60  → 系数 0.76
+        #       质量 30  → 系数 0.58
+        # 这样"睡 8 小时但整夜浅睡（质量 40）"只有 4.5 小时等效，还不清债。
+        # 先按「昨晚睡够没有」结算缺口 —— 这是睡眠债的主体。
+        # 基准取每晚所需时长（默认 7.5h）。睡得少就欠，睡够不欠。
+        # 注意：这里用原始时长而非等效时长，因为「睡了但质量差」由还债环节的
+        # q_factor 处理，两者不重复扣。
+        need = max(4.0, float(getattr(self, "sleep_need_hours", 7.5)))
+        shortfall = max(0.0, need - total_h)
+        if shortfall > 0.0:
+            s.sleep_debt = clamp(s.sleep_debt + shortfall, 0.0, 48.0)
+
+        # 再按质量还债：等效睡眠小时超过 1 小时的部分才抵消债务。
+        q_factor = 0.4 + 0.6 * clamp(s.sleep_quality / 100.0, 0.0, 1.0)
+        effective_h = total_h * q_factor
+        if total_h >= 3.0:
+            # 前 1 小时视为入睡过渡，不计入还债
+            s.sleep_debt = clamp(s.sleep_debt - max(0.0, effective_h - 1.0) * 0.9,
+                                 0.0, 48.0)
+
+        self.bus.emit(Event(s.t, "sleep_end", "info", "醒来", {
+            "slept_h": round(total_h, 2),
+            "light_h": round(s.dur_light / H2S, 2),
+            "deep_h": round(s.dur_deep / H2S, 2),
+            "rem_h": round(s.dur_rem / H2S, 2),
+            "quality": round(s.sleep_quality, 1),
+            "cycles": s.stage_index + 1,
+        }))
 
     # ------------------------------------------------------------------
     # 行为闭环 —— 修复「口渴只升不降」的关键
@@ -796,9 +1455,49 @@ class BodyEngine:
                                + store * GLUCOSE_G_PER_MMOL * (dt / 60.0),
                                0.0, 500.0)
 
-        # 乳酸：无氧代谢
-        lac_t = 1.0 + (6.0 if s.exercising else 0.0) + max(0.0, s.adrenaline - 0.4) * 2.0
-        s.lactate = approach_tau(s.lactate, lac_t, dt, 180.0)
+        # ---- 乳酸：产生快、清除慢的双相模型（2026-11-14 重写）----
+        # 旧实现用单一 approach_tau(..., 180s) 逼近一个离散目标值：
+        # 一停跑就以 3 分钟时间常数往下掉，实测 5 分钟内从 8.0 掉到 1.8。
+        # 这与生理不符 —— 静息恢复时血乳酸清除的半衰期约 25 分钟
+        # （主动恢复更快），完全回到基线需要 1~2 小时。差了十倍以上。
+        #
+        # 文献：
+        #   [R1] Devlin J, et al. Blood lactate clearance after maximal exercise
+        #        depends on active recovery intensity. J Sports Med Phys Fitness.
+        #        2014;54(3):271-278. PMID 24739289
+        #        → 支撑「主动恢复清除更快」的定性方向（本模型 ×1.25 的依据）
+        #   [R2] 半衰期 25 分钟 —— 二手转述（科普文），非一手论文。
+        #        数字与教科书一致但未核实原始研究，后续应替换。
+        # 产率 28 / 15 mmol/L/h 为估算（反推自 15 分钟达 8 mmol/L）。
+        #
+        # 现在拆成两条独立通路：
+        #   1) 产生：运动时按强度持续生成，与当前乳酸浓度无关（线性产率）
+        #   2) 清除：始终进行，速率与浓度成正比（一阶，半衰期 25 分钟）
+        # 运动停止后清除项继续作用，所以曲线是"慢衰减尾巴"而非断崖。
+        lac_base = 1.0                      # 静息基线 mmol/L
+        # 产生速率：高强度运动时血乳酸通常升到 6~12 mmol/L。
+        # 目标是在 15 分钟持续高强度下爬到约 8，所以产率取 28 mmol/L/h
+        # （同时清除项一直在起作用，净累积约一半）。
+        if s.exercising:
+            level = str(getattr(s, "exercise_intent", "") or "mid")
+            prod = 28.0 if level == "high" else 15.0
+            # 肌糖原见底时无氧供能占比上升，产乳酸更快
+            if s.glycogen < 80.0:
+                prod *= 1.35
+            s.lactate += prod * (dt / H2S)
+        # 肾上腺素偏高也会轻度促乳酸（应激性糖解）
+        if s.adrenaline > 0.6:
+            s.lactate += (s.adrenaline - 0.6) * 1.2 * (dt / H2S)
+        # 清除：一阶，半衰期 25 分钟。运动刚结束时清除略快（肌肉仍在泵血），
+        # 但没有旧模型那么夸张 —— 这里用 1.25 倍系数体现"运动后即刻"。
+        clear_halflife_min = 25.0
+        clear_k = math.log(2.0) / (clear_halflife_min * 60.0)
+        recent = (s.t - float(getattr(s, "last_exercise_t", 0.0))) < 600.0
+        if recent:
+            clear_k *= 1.25
+        above = max(0.0, s.lactate - lac_base)
+        s.lactate -= above * (1.0 - math.exp(-clear_k * dt))
+        s.lactate = clamp(s.lactate, 0.5, 25.0)
 
         # 脂肪储备氧化：吸收进来的脂肪按 6 h 半衰期进入供能池。
         # 没有这一项时高脂餐（坚果/巧克力/三明治）与白米饭对能量毫无区别。
@@ -1036,9 +1735,17 @@ class BodyEngine:
         na_load = s.na_mass / 5880.0
         na_target_day = max(60.0, s.na_intake_24h)
         na_excrete = (na_target_day / 86400.0) * clamp(na_load ** 4, 0.15, 8.0) * dt
-        # 醛固酮保钠：削减排出
+        # 醛固酮保钠：削减排出量
         na_excrete *= (1.0 - 0.45 * clamp(s.aldosterone - 0.5, 0.0, 1.5))
         s.na_mass = max(4500.0, s.na_mass - na_excrete)
+
+        # 醛固酮「回收」：真实靶点是肾小管 Na+ 重吸收，效果是「少排」而非「凭空加」。
+        # 2026-11-14 修：旧实现在 _endocrine 里写 na < 140 就 min(6200, +aldo*0.02*dt)，
+        # 只加不减，90 天实测 na_mass 从 6060 一路顶到 6200 天花板再也不回落。
+        # 现在改为从本步排出量里「省下」一部分，保证总量守恒、能回落。
+        if s.na < 140.0 and na_excrete > 0.0:
+            deficit = clamp((140.0 - s.na) / 5.0, 0.0, 1.0)
+            s.na_mass += na_excrete * 0.55 * deficit
 
         # ---- 水平衡：尿量 = 溶质排出 / 尿渗透压 ----
         # 早期写法用「滤过量 × (1-重吸收率)」，重吸收率又被标定成 0.9917 这种半经验数，
@@ -1099,6 +1806,189 @@ class BodyEngine:
     # ------------------------------------------------------------------
     # 内分泌：RAAS / HPA / 甲状腺 / ADH
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 月经周期（2026-11-14 新增）
+    # ------------------------------------------------------------------
+    # 依据 LIFE.apk 元数据的两套并列相位枚举：
+    #   MenstrualPhase: Follicular / Ovulation / Luteal
+    #   UterusPhase:    Proliferative / Secretory （另有 Menstruation）
+    # 以及腺体 EstrogenGland / ProgesteroneGland 与激素 Estradiol/Estrone/Estriol。
+    # 因此这里保留两条独立相位，而不是压成「周期第 N 天」。
+    MENSTRUAL_LENGTH = 5.0      # 行经持续天数
+
+    def set_cycle_anchor(self, anchor) -> None:
+        """设置/清除现实日期锚点（date 或 None）。
+
+        换锚点时清掉回绕基准：否则「昨天填的是上月，今天改成上周」会让
+        day 突然倒退，被误判成跨过了周期末，凭空发一条「新一轮开始」。
+        """
+        if anchor == self.cycle_anchor_date:
+            return
+        self.cycle_anchor_date = anchor
+        self._cycle_skip_wrap_once = True
+
+    @staticmethod
+    def _calendar_cycle_raw(anchor) -> float:
+        """(今天 - 上次月经首日) 的天数，含当天已过的小数部分。
+
+        以本地 00:00 为日界：一天之内相位平滑推进，跨天时正好落在整日上。
+        DST 那天的 23/25 小时忽略不计（最多差一小时，对相位没意义）。
+        日期在未来（用户填错）时按 0 处理，等价于「今天刚开始」。
+        """
+        now = _datetime.now()
+        frac = (now.hour * 3600 + now.minute * 60 + now.second
+                + now.microsecond / 1e6) / 86400.0
+        raw = float((now.date() - anchor).days) + frac
+        return raw if raw >= 0.0 else 0.0
+
+    def _menstrual(self, dt):
+        """推进月经双相位机，并派生雌激素/孕激素。
+
+        总开关关闭时直接返回并把相关量清零：不推进周期、不产生激素、
+        不会有痛经与 PMS，界面也不显示。开关在引擎上（cycle_enabled），
+        由插件从配置注入。
+        """
+        s = self.s
+        if not self.cycle_enabled:
+            # 关闭态：保证这些量恒为中性，避免残留值影响体温/压力公式
+            s.menstrual_phase = ""
+            s.uterus_phase = ""
+            s.menstruating = False
+            s.menstrual_flow = 0.0
+            s.estrogen = 0.0
+            s.progesterone = 0.0
+            s.prostaglandin = 0.0
+            s.pms_load = 0.0
+            s.follicle_maturing = False
+            s.luteal_maturing = False
+            return
+
+        anchor = getattr(self, "cycle_anchor_date", None)
+        if not s.menarche_done:
+            s.menarche_done = True
+            s.cycle_length = float(self.cycle_length_days)
+            if anchor is None:
+                # 旧行为：新身体从行经结束后起步（day 6），不立刻来月经。
+                # 有现实锚点时不做这个猜测 —— 相位完全由日历决定。
+                s.menstrual_day = 6.0
+
+        L = max(18.0, float(s.cycle_length))
+        prev_day = float(s.menstrual_day or 0.0)
+        if anchor is not None:
+            # 现实日历锚点：第几天直接由「今天 - 上次月经首日」算出。
+            # 注意不能用累加：累加的零点是"启用那一刻"，与日历无关，
+            # 而且掉帧/离线截断会让它一路滞后。
+            raw = self._calendar_cycle_raw(anchor)
+        else:
+            raw = prev_day + dt / (24.0 * H2S)
+        day = raw % L
+        s.menstrual_day = day
+        s.cycle_length = L
+
+        # ---- 相位判定 ----
+        # 行经：cycle 起点后 0~5 天
+        # 卵泡期：5 天 ~ 排卵前（约 L*0.5）
+        # 排卵：一个窄窗口（约 1 天）
+        # 黄体期：排卵后 ~ 周期结束
+        ovulation_day = L * 0.5
+        if day < self.MENSTRUAL_LENGTH:
+            uterus = "menstrual"
+            menstr = "follicular"   # 行经仍属卵泡期总体（激素上 E2 在上升）
+            flowing = True
+            flow = 1.0 - day / self.MENSTRUAL_LENGTH
+        elif day < ovulation_day - 1.0:
+            uterus = "proliferative"
+            menstr = "follicular"
+            flowing = False
+            flow = 0.0
+        elif day < ovulation_day + 1.0:
+            uterus = "proliferative"
+            menstr = "ovulation"
+            flowing = False
+            flow = 0.0
+        else:
+            uterus = "secretory"
+            menstr = "luteal"
+            flowing = False
+            flow = 0.0
+
+        s.menstrual_phase = menstr
+        s.uterus_phase = uterus
+        s.menstruating = flowing
+        s.menstrual_flow = clamp(flow, 0.0, 1.0)
+
+        # ---- 雌激素 / 孕激素曲线 ----
+        # 雌激素：卵泡期逐渐升高，排卵前达峰，黄体期次峰后回落
+        # 孕激素：排卵前接近 0，黄体期升到高位，行经前骤降
+        if menstr == "follicular":
+            # 行经期低，随后单调上升
+            e2 = 0.15 + 0.75 * clamp((day - self.MENSTRUAL_LENGTH) /
+                                     max(1.0, ovulation_day - 1.0 - self.MENSTRUAL_LENGTH),
+                                     0.0, 1.0)
+        elif menstr == "ovulation":
+            e2 = 1.0          # 排卵前峰值
+        else:
+            # 黄体期为次峰，向周期末回落
+            tail = clamp((day - ovulation_day) / max(1.0, L - ovulation_day), 0.0, 1.0)
+            e2 = 0.65 * (1.0 - 0.55 * tail)
+
+        if menstr in ("follicular", "ovulation"):
+            p4 = 0.05
+        else:
+            p4 = 0.20 + 0.80 * clamp((day - ovulation_day) / max(1.0, L - ovulation_day),
+                                     0.0, 1.0)
+
+        s.estrogen = approach_tau(s.estrogen, e2, dt, 3.0 * H2S)
+        s.progesterone = approach_tau(s.progesterone, p4, dt, 3.0 * H2S)
+
+        # 卵泡成熟 / 黄体成熟（对应 APK 的两个 Maturation 枚举）
+        s.follicle_maturing = menstr == "follicular" and day > self.MENSTRUAL_LENGTH
+        s.luteal_maturing = menstr == "luteal" and p4 > 0.3
+
+        # ---- 前列腺素（APK: ProstaglandinF2 / ProstaglandinD2）----
+        # 行经期子宫内膜脱落释放前列腺素，峰值在行经第 1~2 天。
+        # 它不只致痛，还引起子宫收缩、恶心、腹泻、血管扩张。
+        pgn_t = 0.0
+        if menstr == "follicular" and flowing:
+            # 行经前 2 天最高，之后衰减
+            pgn_t = clamp(1.0 - (day - 1.0) / max(1.0, self.MENSTRUAL_LENGTH - 1.0), 0.15, 1.0)
+        elif menstr == "luteal":
+            # 黄体末期（行经前 2~3 天）前列腺素开始上升，这是 PMS 的前驱
+            pre = clamp((day - (L - 3.0)) / 3.0, 0.0, 1.0)
+            pgn_t = 0.35 * pre
+        s.prostaglandin = approach_tau(s.prostaglandin, pgn_t, dt, 4.0 * H2S)
+
+        # ---- PMS（经期综合征）----
+        # 黄体后期孕激素高位后回落、雌激素同时下降，触发情绪低落与体感不适。
+        # 真实机制涉及 5-HT 能系统，这里简化为"黄体后期 + 激素双降"的负荷。
+        if menstr == "luteal":
+            pre = clamp((day - (L - 7.0)) / 7.0, 0.0, 1.0)
+            s.pms_load = clamp(pre * (0.5 + 0.5 * clamp(1.0 - s.estrogen, 0.0, 1.0)),
+                               0.0, 1.0)
+        else:
+            s.pms_load = approach_tau(s.pms_load, 0.0, dt, 6.0 * H2S)
+
+        # 周期回绕：day 由大跳到小即进入新一轮行经。
+        # 旧写法判断 day >= L，但锚定模式下 day 是取模结果、永远小于 L，
+        # 那个条件再也不成立 —— 所以改成「比上一步明显倒退」。
+        # 回绕那一拍直接切到行经第 0 天，否则仍显示 luteal/secretory
+        # （实测采样点看到过这个现象）。
+        # 基准取「上一步写进 state 的 day」而不是私有缓存：首次调用也要能判，
+        # 否则从存档恢复时（存档里是第 27.5 天）第一次就漏发新一轮事件。
+        skip = bool(getattr(self, "_cycle_skip_wrap_once", False))
+        self._cycle_skip_wrap_once = False
+        if not skip and day < prev_day - 0.5:
+            if anchor is None:
+                # 累加模式：把累积值归零，等价于旧行为
+                s.menstrual_day = 0.0
+            # 锚定模式保留日历算出的小数（例如第 0.87 天），
+            # 归零会丢到当天已过的进度
+            s.menstrual_phase = "follicular"
+            s.uterus_phase = "menstrual"
+            s.menstruating = True
+            s.menstrual_flow = 1.0
+            self.bus.emit(Event(s.t, "menstrual_cycle", "info", "新一轮周期开始", {}))
+
     def _endocrine(self, dt):
         s = self.s
         dif = (s.osmol - 290.0)
@@ -1109,9 +1999,9 @@ class BodyEngine:
         s.ang2 = approach(s.ang2, clamp(s.renin * 1.2, 0.2, 3.0), dt, "ang2")
         s.aldosterone = approach(s.aldosterone, clamp(s.ang2 * 0.8, 0.0, 3.0), dt, "aldo")
 
-        # 醛固酮保钠：回收尿钠（真实作用靶点是肾小管，这里并入总量）
-        if s.na < 140.0:
-            s.na_mass = min(6200.0, s.na_mass + s.aldosterone * 0.02 * dt)
+        # 醛固酮保钠的「回收」动作已移入 _renal 里与排钠同处计算，
+        # 因为需要用到当步的 na_excrete 才能守恒（钠只能从尿里省，不能凭空造）。
+        # 这里只保留说明，不做任何加减。
 
         # ---- ADH ----
         # 容量抑制：血容量偏高时 ADH 下降（水负荷抑制），这是打破
@@ -1147,6 +2037,43 @@ class BodyEngine:
     def _thermo(self, dt):
         s = self.s
         base = 36.8 + 0.35 * s.circ - 0.30 * s.adrenaline
+
+        # ---- 室外环境对核心体温的影响（2026-11-14 新增）----
+        # 旧实现完全没有环境项：零下十度和三十五度对身体来说完全一样。
+        # 真实机制是热平衡：冷时血管收缩 + 战栗产热，热时血管扩张 + 出汗散热。
+        # 这里只做「核心体温的轻微位移」，因为人体有很强的恒温能力 ——
+        # 环境极端时核心体温也只偏移零点几度，真正剧烈变化的是体感与出汗量。
+        # env_load 是 0~1 的冷热压迫；室内要打折（现代住宅保温良好）。
+        eff_load = clamp(float(getattr(s, "env_load", 0.0) or 0.0), 0.0, 1.0)
+        indoor_temp = getattr(s, "env_indoor_temp_c", None)
+        if bool(getattr(s, "env_indoor", True)):
+            if indoor_temp is not None:
+                # 预留接口已接入：有真实室内温度时，用它重新算压迫
+                # 空调房 26℃ 和暖气房 18℃ 不该是同一种体感
+                from . import weather as _wx
+                _hum = getattr(s, "env_indoor_humidity", None)
+                eff_load = _wx.outdoor_load(
+                    float(indoor_temp),
+                    float(_hum) if _hum is not None else 50.0,
+                    0.0,   # 室内无风
+                )
+            else:
+                # 未接入：沿用旧逻辑，室外压迫打 25 折
+                eff_load *= 0.25
+        if eff_load > 0.0:
+            feels = float(getattr(s, "env_feels_c", 22.0) or 22.0)
+            if feels < 18.0:
+                # 冷：核心体温下移，最多 0.4℃（暴露在严寒里）
+                base -= 0.40 * eff_load
+            elif feels > 24.0:
+                # 热：核心体温上移，最多 0.35℃
+                base += 0.35 * eff_load
+        # 月经周期对基础体温的影响（真实且显著，是临床判断排卵的依据）：
+        # 排卵后孕激素升高使基础体温上移 0.3~0.5℃，行经前回落。
+        # 依据 APK 元数据 ProgesteroneGland / Thermometer。
+        base += 0.40 * clamp(s.progesterone / 1.0, 0.0, 1.0)
+        # 前列腺素 PGE2 是内源性致热原：经期可致低热（0.1~0.3℃）
+        base += 0.25 * clamp(s.prostaglandin, 0.0, 1.0)
         if s.exercising:
             base += 0.8
         # 睡眠期核心体温下移 0.3~0.5 ℃，是昼夜曲线的低谷成因之一
@@ -1167,8 +2094,13 @@ class BodyEngine:
         # 按 0.8 L/h 折算每天凭空蒸发 3 L —— 实测不显性失水 1.5-2.7 L/天
         # （生理值 0.95 L/天），这是把人渴坏的直接原因之一。
         # 真实出汗阈值在 37.5 ℃ 以上（核心温度升高 1 ℃ 才明显出汗）。
-        s.sweat = clamp((s.temp - 37.5) * 2.0, 0.0, 1.0)
-        s.shiver = clamp((36.5 - s.temp) * 3.0, 0.0, 1.0)
+        # 出汗与战栗：除了核心体温，还受室外环境影响。
+        # 炎热时即使核心体温没升多少，皮肤温度高、汗腺被直接激活；
+        # 寒冷时同理。这一点用 eff_load 叠加，系数控制在不会失控的范围。
+        heat_env = eff_load if float(getattr(s, "env_feels_c", 22.0) or 22.0) > 24.0 else 0.0
+        cold_env = eff_load if float(getattr(s, "env_feels_c", 22.0) or 22.0) < 18.0 else 0.0
+        s.sweat = clamp((s.temp - 37.5) * 2.0 + 0.55 * heat_env, 0.0, 1.0)
+        s.shiver = clamp((36.5 - s.temp) * 3.0 + 0.60 * cold_env, 0.0, 1.0)
         if s.sweat > 0.1:
             lost = s.sweat * 0.8 * dt / 1000.0          # L
             # 34.0 的硬底相当于体重 42 L 的 81%（失水 19%），真人此时已死亡多时。
@@ -1254,15 +2186,118 @@ class BodyEngine:
                                   + 0.35 * (1.0 - s.hunger / 100.0)
                                   + 0.20 * (1.0 - s.thirst / 100.0)), 0.0, 100.0)
 
+        # ---- 延迟性肌肉酸痛 DOMS（2026-11-14 新增）----
+        # 这**不是**乳酸造成的：乳酸几小时就清除，而 DOMS 峰值在运动后 48-72h。
+        # 机制是肌纤维微损伤 + 局部炎症反应（Hotfiel 2018 [R4]）。
+        # 曲线按三段建模：
+        #   0 ~ 24h   逐渐上升（炎症启动）
+        #   24 ~ 72h  达峰并平台（"峰值在 48-72 小时"）
+        #   > 72h     线性衰减，约 5-7 天完全消退
+        doms_now = 0.0
+        if s.doms_from_exercise > 0.0 and s.doms_peak_at > 0.0:
+            # doms_peak_at = 运动结束 + 48h（未来时刻）。
+            # 运动结束时刻 = doms_peak_at - 48h，所以"运动后小时数"：
+            #   since_h = (now - (peak_at - 48h)) / 1h
+            #           = (now - peak_at)/1h + 48
+            # 旧实现少了这个减法，刚触发时 since_h = 0 直接落进 <=0 分支归零，
+            # 导致 DOMS 永远算不出来（实测事件发了但 doms 恒为 0）。
+            since_h = (s.t - (s.doms_peak_at - 48.0 * H2S)) / H2S
+            peak = s.doms_from_exercise
+            if since_h <= 0.0:
+                doms_now = 0.0
+            elif since_h < 24.0:
+                doms_now = peak * (since_h / 24.0) * 0.75      # 上升段
+            elif since_h < 72.0:
+                # 24-72h 平台，48h 附近最高
+                t_rel = (since_h - 24.0) / 48.0
+                doms_now = peak * (0.75 + 0.25 * math.sin(math.pi * t_rel))
+            else:
+                # 72h 后线性消退，到 168h（7 天）归零
+                fade = clamp(1.0 - (since_h - 72.0) / 96.0, 0.0, 1.0)
+                doms_now = peak * fade
+            # 只在「已经过了消退期」才清空状态。
+            # 2026-11-14 修：旧条件写的是 doms_now <= 0.1，于是上升段刚开始
+            # （since_h 才几分钟，doms_now 算出来 0.03）就被判定为"没了"，
+            # 第一次 step 就把 doms_from_exercise 清零 —— DOMS 永远长不出来。
+            if since_h >= 168.0:
+                s.doms_from_exercise = 0.0
+                s.doms_peak_at = 0.0
+                doms_now = 0.0
+        s.doms = clamp(doms_now, 0.0, 100.0)
+
+        # ---- 疼痛（2026-11-14 新增：此前 pain 恒为 0，是个死字段）----
+        # 旧实现全仓只有一处 `s.pain = max(0.0, s.pain * (1-k))`，
+        # 而且那处在 _treat() 里 —— 只在住院时执行。于是平时 pain 永远是 0，
+        # FEELING_LEVELS["pain"] 五档从不触发，stress/health 里乘的都是 0。
+        #
+        # 现在的唯一疼痛源是痛经，依据是 APK 元数据里的 ProstaglandinF2
+        # （前列腺素 F2α，子宫内膜脱落的关键介质，也是临床引产/痛经的直接成因）。
+        # 疼痛强度由三件事决定：
+        #   (a) 经血量 menstrual_flow —— 流量越大前列腺素越多
+        #   (b) 孕激素回落幅度 —— 黄体期末 P4 骤降触发前列腺素合成（真实机制）
+        #   (c) 雌激素水平 —— E2 高的周期前列腺素受体更敏感
+        pain_menstrual = 0.0
+        if self.cycle_enabled and self.cycle_pain_enabled and s.menstruating and s.menstrual_flow > 0.0:
+            # 前列腺素是痛经的直接介质（APK: ProstaglandinF2）。
+            # 真实机制：PGF2α 引起子宫平滑肌强烈收缩 + 局部缺血，同时提高
+            # 痛觉神经末梢敏感性。雌激素高时受体更敏感，故乘 e2_sens。
+            e2_sens = 0.6 + 0.4 * clamp(s.estrogen, 0.0, 1.0)
+            pain_menstrual = clamp(80.0 * s.prostaglandin * e2_sens, 0.0, 85.0)
+
+        # ---- 内源性镇痛（β-内啡肽）----
+        # 持续疼痛会触发内源性镇痛：痛得越久、越强，内啡肽释放越多，
+        # 实际痛感被"打折"。这是"痛久了反而麻木"的生理基础。
+        endo_t = clamp(0.1 + s.pain / 100.0 * 0.8, 0.0, 1.0)
+        s.endorphin = approach_tau(s.endorphin, endo_t, dt, 30.0 * 60.0)
+
+        # 疼痛合成：痛经 + DOMS，取较大者而非相加。
+        # 理由：两种疼痛的神经通路有重叠，简单相加会重复计数；
+        # 实际体验中"又痛经又酸痛"确实不会痛到两倍。
+        pain_total = max(pain_menstrual, s.doms)
+        # 内啡肽镇痛对两种疼痛都有效
+        perceived = clamp(pain_total * (1.0 - 0.45 * s.endorphin), 0.0, 100.0)
+        s.pain = approach_tau(s.pain, perceived, dt, 20.0 * 60.0)
+
         # 压力
         stress_t = clamp(s.cortisol * 32.0
                          + max(0.0, s.thirst - 50.0) * 0.30
                          + max(0.0, s.hunger - 70.0) * 0.35
-                         + max(0.0, s.pain) * 0.5, 0.0, 100.0)
+                         + max(0.0, s.pain) * 0.5
+                         # PMS：黄体后期激素双降引起的情绪负荷（5-HT 能紊乱的简化）
+                         + s.pms_load * 18.0, 0.0, 100.0)
         s.stress = approach(s.stress, stress_t, dt, "affect")
 
-        # 体感温度（50 为舒适）
-        s.thermal = clamp(50.0 + (s.temp - 36.8) * 18.0 - s.sweat * 20.0 + s.shiver * -25.0, 0.0, 100.0)
+        # 体感温度（50 为舒适）。
+        # 2026-11-14：加入室外环境项。旧公式只看核心体温/出汗/战栗，
+        # 而核心体温的恒温能力很强，导致"外面 38℃ 和 22℃ 体感一样"。
+        # 真实体感主要由皮肤温度与环境热交换决定，这里用 env_feels_c 直接投影：
+        #   体感 30℃ 以上 → 偏热（每度约 2 分）
+        #   体感 15℃ 以下 → 偏冷（每度约 2 分）
+        # 室内时按 env_indoor 衰减，因为室内有空调/暖气。
+        env_thermal = 0.0
+        _feels = float(getattr(s, "env_feels_c", 22.0) or 22.0)
+        _indoor = bool(getattr(s, "env_indoor", True))
+        _in_temp = getattr(s, "env_indoor_temp_c", None)
+        if _indoor and _in_temp is not None:
+            # 预留接口已接入：室内有真实温度时直接用它，不再用室外值打折。
+            # 否则空调 26℃ 和暖气 18℃ 会算出同一个体感（实测都是 65.0）。
+            from . import weather as _wx2
+            _in_hum = getattr(s, "env_indoor_humidity", None)
+            _feels = _wx2.feels_like(float(_in_temp),
+                                     float(_in_hum) if _in_hum is not None else 50.0,
+                                     0.0)
+            _w = 1.0
+        else:
+            _w = 0.30 if _indoor else 1.0     # 室内只按三成计入
+        if _feels > 28.0:
+            env_thermal += min(35.0, (_feels - 28.0) * 2.2) * _w
+        elif _feels < 15.0:
+            env_thermal -= min(35.0, (15.0 - _feels) * 2.0) * _w
+        s.thermal = clamp(
+            50.0 + (s.temp - 36.8) * 18.0 - s.sweat * 20.0 + s.shiver * -25.0
+            + env_thermal,
+            0.0, 100.0,
+        )
 
         # 低落（APK 症状枚举 Depression 的直接对应物）。
         # 口径：持续的应激负荷累积 + 当前压力水平，无社会/睡眠输入 —— 那些量
@@ -1286,7 +2321,13 @@ class BodyEngine:
         pen += max(0.0, 55.0 - s.map) * 0.35
         pen += max(0.0, s.temp - 39.5) * 3.0
         pen += max(0.0, 35.0 - s.temp) * 3.0
-        pen += s.pain * 0.05
+        # 疼痛对健康的扣分：痛经属功能性疼痛，不造成组织损伤，故不计入健康惩罚。
+        # 演变过程：旧系数 0.05 会让 85 分痛经扣 4.25 健康/步，第 2 天就跌破
+        # 急救阈值 25 被送医；改 0.008 后虽不再住院，但健康仍在经期 5 天里
+        # 从 100 掉到 68（恢复速率仅 0.6/h），相当于"来次月经虚弱一周"，不符合实际。
+        # 疼痛对说话的观感已经由 stress 通路承担（stress_t 含 pain*0.5），
+        # 这里不再重复计入健康。器质性疼痛（创伤/感染）留给后续 injury 通路单独计。
+        # pen += s.pain * 0.0  ← 保留占位说明，不参与计算
 
         # ---- 缺失过程的后果（2026-11-08 新增）----
         # 旧版只有 7 项惩罚，且没有任何一项与「摄入」挂钩：实测 30 天零摄入

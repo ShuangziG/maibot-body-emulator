@@ -77,8 +77,12 @@ def _tile(label: str, value: str, unit: str, word: str, color: str) -> str:
     )
 
 
-def build_html(s) -> str:
-    """把 BodyState 画成一张 PNG 卡片对应的 HTML。"""
+def build_html(s, cycle_enabled: bool = False) -> str:
+    """把 BodyState 画成一张 PNG 卡片对应的 HTML。
+
+    cycle_enabled 为 False 时不输出月经周期区块 —— 该功能默认关闭，
+    关闭时界面上不该出现任何相关条目。
+    """
 
     hr_tone = _tone([(50, "", "warn"), (60, "", "warn"), (85, "", "ok"),
                      (100, "", "warn"), (999, "", "bad")], s.hr)
@@ -125,6 +129,66 @@ def build_html(s) -> str:
         flags = f'<div class="flag">正在医院接受急救，还有约 {left_h:.1f} 小时</div>'
     elif getattr(s, "critical", False):
         flags = '<div class="flag">生命体征不稳，正在观察</div>'
+
+    # ---- 睡眠区块 ----
+    _stage_zh = {"awake": "清醒", "light": "浅睡", "deep": "深睡", "rem": "快速眼动"}
+    _stage = str(getattr(s, "sleep_stage", "awake") or "awake")
+    _sleeping = bool(getattr(s, "sleeping", False))
+    _total_sleep = (getattr(s, "dur_light", 0.0) + getattr(s, "dur_deep", 0.0)
+                    + getattr(s, "dur_rem", 0.0))
+    if _total_sleep > 0.0:
+        _lh = getattr(s, "dur_light", 0.0) / 3600.0
+        _dh = getattr(s, "dur_deep", 0.0) / 3600.0
+        _rh = getattr(s, "dur_rem", 0.0) / 3600.0
+        sleep_block = (
+            '<div class="divider"></div>'
+            '<div class="sec-title">睡眠</div>'
+            '<div class="gut">'
+            f'<div class="gut-box"><div class="gut-k">当前阶段</div>'
+            f'<div class="gut-v">{_esc(_stage_zh.get(_stage, _stage)) if _sleeping else "清醒中"}</div></div>'
+            f'<div class="gut-box"><div class="gut-k">浅睡 / 深睡 / REM</div>'
+            f'<div class="gut-v">{_lh:.1f}h / {_dh:.1f}h / {_rh:.1f}h</div></div>'
+            f'<div class="gut-box"><div class="gut-k">质量 · 夜间醒来</div>'
+            f'<div class="gut-v">{getattr(s, "sleep_quality", 0.0):.0f} 分 · '
+            f'{int(getattr(s, "wake_count", 0) or 0)} 次</div></div>'
+            '</div>'
+        )
+    else:
+        # 新身体还没经历过一次睡眠窗口。这里不该整块消失 —— 那看起来像功能坏了，
+        # 而事实是"还没有数据"。保留区块并写明何时会有数据。
+        sleep_block = (
+            '<div class="divider"></div>'
+            '<div class="sec-title">睡眠</div>'
+            '<div class="gut">'
+            '<div class="gut-box"><div class="gut-k">当前阶段</div>'
+            '<div class="gut-v">清醒中</div></div>'
+            '<div class="gut-box"><div class="gut-k">睡眠结构</div>'
+            '<div class="gut-v">将在第一次睡眠后记录</div></div>'
+            '<div class="gut-box"><div class="gut-k">质量 · 夜间醒来</div>'
+            '<div class="gut-v">—</div></div>'
+            '</div>'
+        )
+
+    # ---- 月经区块（仅开启时输出）----
+    cycle_block = ""
+    if cycle_enabled:
+        _ph = {"follicular": "卵泡期", "ovulation": "排卵期", "luteal": "黄体期"}
+        _ut = {"menstrual": "行经期", "proliferative": "增殖期", "secretory": "分泌期"}
+        _phase = str(getattr(s, "menstrual_phase", "") or "")
+        _uterus = str(getattr(s, "uterus_phase", "") or "")
+        _pain = float(getattr(s, "pain", 0.0) or 0.0)
+        cycle_block = (
+            '<div class="divider"></div>'
+            '<div class="sec-title">月经周期</div>'
+            '<div class="gut">'
+            f'<div class="gut-box"><div class="gut-k">相位</div>'
+            f'<div class="gut-v">{_esc(_ph.get(_phase, "-"))} · {_esc(_ut.get(_uterus, "-"))}</div></div>'
+            f'<div class="gut-box"><div class="gut-k">雌激素 / 孕激素</div>'
+            f'<div class="gut-v">{getattr(s, "estrogen", 0.0):.2f} / {getattr(s, "progesterone", 0.0):.2f}</div></div>'
+            f'<div class="gut-box"><div class="gut-k">疼痛</div>'
+            f'<div class="gut-v">{_pain:.0f} / 100</div></div>'
+            '</div>'
+        )
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -208,6 +272,8 @@ def build_html(s) -> str:
       <div class="gut-v" style="color:{_TONE_COLOR[health_tone]}">{s.health:.0f} / 100</div>
     </div>
   </div>
+  {sleep_block}
+  {cycle_block}
   {flags}
   <div class="foot"><span>生理状态为仿真数据，不构成医学建议</span><span>lifebody</span></div>
 </div></body></html>"""

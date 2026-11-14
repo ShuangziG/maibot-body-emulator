@@ -24,3 +24,10 @@ logs/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 开发期临时产物（不进仓库）
+_test_artifacts/
+_wave_preview.*
+CHANGELOG_DEV.md
+apk_report/
+*.tmp

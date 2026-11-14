@@ -160,17 +160,126 @@ class BodyState:
     depression: float = 2.0   # 累积应激导出         [APK: Depression]
     stress_load: float = 0.0  # 应激累积（抑郁的输入，中间量）
 
-    # ---- 睡眠（2026-11-08 新增）----
+    # ---- 室外环境（2026-11-14 新增）----
+    # 由插件定时从 Open-Meteo 抓取，注入引擎。引擎不知道天气怎么来的，
+    # 只知道「外面多冷多热、她现在在不在室外」。
+    env_temp_c: float = 22.0        # 室外气温
+    env_humidity: float = 50.0      # 室外相对湿度 %
+    env_feels_c: float = 22.0       # 体感温度
+    env_load: float = 0.0           # 室外冷热压迫 0~1
+    env_indoor: bool = True         # 是否在室内（室内时压迫大幅衰减）
+    env_wind_ms: float = 0.0        # 室外风速 m/s（室内为 0）
+    env_updated_at: float = 0.0     # 上次更新时间
+    # 室内环境（2026-11-14 预留接口，当前未接入数据源）
+    # 现在室内统一按"中性、无冷热压迫"处理。将来若接入室内温湿度
+    # （智能家居、手动配置、或按季节推算），把值写进这两个字段即可自动生效，
+    # 引擎的 _thermo 已经会读它们，不需要再改引擎代码。
+    env_indoor_temp_c: float | None = None    # None = 未知，按中性处理
+    env_indoor_humidity: float | None = None  # None = 未知，按中性处理
+
+    # ---- 睡眠（2026-11-08 新增；2026-11-14 加入四态睡眠周期）----
     # 旧版只有 external link_sleep 一个注入点，而部署配置里没有 [link] 段，
     # 于是永不为 0 —— 这具身体从来没有睡过觉：夜间照常饮水、起夜、交感不降。
     # 现改为引擎自持：按昼夜窗口入睡，睡眠深度 0..1，可被外部 link 覆盖。
-    sleep_depth: float = 0.0      # 睡眠深度 0=清醒 1=深睡
+    sleep_depth: float = 0.0      # 睡眠深度 0=清醒 1=深睡（由阶段派生）
     sleeping: bool = False        # 是否处于睡眠（sleep_depth > 0.5）
     sleep_debt: float = 0.0       # 睡眠债（小时），长期熬夜累积
     last_sleep_t: float = 0.0     # 上次入睡的仿真时刻
 
+    # ---- 睡眠周期（2026-11-14 新增，四态分期）----
+    # 参考 Oura/PSG 的分期口径：一个 NREM-REM 周期约 90 分钟，
+    # 整夜 4~6 个周期。旧实现只有单一连续深度，无法表达"入睡后先深睡、
+    # 后半夜 REM 变多"这一真实结构，睡眠债也因此没有质量维度可扣。
+    # 阶段取值：awake / light / deep / rem
+    sleep_stage: str = "awake"    # 当前睡眠阶段
+    stage_elapsed: float = 0.0    # 当前阶段已持续（仿真秒）
+    stage_index: int = 0          # 本次睡眠内的第几个周期（0 起）
+    cycle_pos: float = 0.0        # 当前周期内位置（0..1）
+    # 整夜累计（入睡时清零，醒来结算）
+    dur_light: float = 0.0        # 浅睡累计（仿真秒）
+    dur_deep: float = 0.0         # 深睡累计
+    dur_rem: float = 0.0          # REM 累计
+    dur_awake: float = 0.0        # 睡眠中途清醒累计
+    sleep_quality: float = 0.0    # 本次睡眠质量评分 0~100
+    sleep_onset_t: float = 0.0    # 本次入睡时刻（用于总时长）
+    last_sleep_hours: float = 0.0 # 最近一次完整睡眠的时长（小时），运动门槛用
+    # ---- 强制睡眠 / 微睡眠（2026-11-14）----
+    # 依据 [R6] Durmer & Dinges 2005: "Microsleeps, sleep attacks, and lapses
+    # in cognition increase with sleep loss"。连续清醒过久会出现不可抗拒的
+    # 睡眠发作，不是靠意志能扛住的。
+    awake_hours: float = 0.0      # 距上次睡着的连续清醒时长
+    forced_sleep: bool = False    # 是否处于强制睡眠（微睡眠）状态
+    forced_sleep_at: float = 0.0  # 本次强制睡眠开始时刻
+    microsleep_count: int = 0     # 累计微睡眠次数
+
+    # ---- 夜间唤醒（2026-11-14 新增）----
+    # 真实睡眠不是一整段连续的：夜里会因消息、口渴、憋尿而短暂醒来。
+    # 唤醒源分开记，便于 WebUI 区分「被吵醒」和「生理性醒」。
+    wake_count: int = 0           # 本次睡眠内清醒次数（所有来源合计）
+    wake_by_message: int = 0      # 因消息被唤醒次数
+    wake_by_thirst: int = 0       # 渴醒次数
+    wake_by_bladder: int = 0      # 憋尿醒次数
+    wake_pending: bool = False    # 处于「被唤醒后等待重新入睡」状态
+    wake_since: float = 0.0       # 本次唤醒的仿真时刻
+    last_wake_reason: str = ""    # 最近一次唤醒原因（展示用）
+
+    # ---- 月经周期（2026-11-14 新增，双相位机）----
+    # 依据 LIFE.apk 元数据：MenstrualPhase(Follicular/Ovulation/Luteal) 与
+    # UterusPhase(Proliferative/Secretory) 是两套并列的相位枚举，
+    # 另有 Menstruation / FollicleMaturation / LutealMaturation / Proliferation。
+    # 故这里也保留两条独立相位，而不是合成"周期第 N 天"。
+    menarche_done: bool = False   # 是否已初潮（新身体需要先跑一轮）
+    menstrual_day: float = 0.0    # 距上次行经开始的仿真天数
+    menstrual_phase: str = ""     # follicular / ovulation / luteal
+    uterus_phase: str = ""        # proliferative / secretory / menstrual
+    menstruating: bool = False    # 是否正在行经
+    estrogen: float = 0.0         # 雌激素相对浓度 [APK: EstrogenGland / Estradiol]
+    progesterone: float = 0.0     # 孕激素相对浓度 [APK: ProgesteroneGland]
+    follicle_maturing: bool = False   # 卵泡成熟中 [APK: FollicleMaturation]
+    luteal_maturing: bool = False     # 黄体成熟中 [APK: LutealMaturation]
+    menstrual_flow: float = 0.0   # 经血量 0..1（用于疼痛与体感）
+    cycle_length: float = 28.0    # 个人周期长度（天），可被随机化
+    # 前列腺素 E2/F2α 相对浓度。APK 元数据含 ProstaglandinF2 / ProstaglandinD2 /
+    # Prostacyclin，是经期疼痛与子宫收缩的直接介质，也引起恶心、腹泻、
+    # 血管扩张（面色苍白、发冷）。
+    prostaglandin: float = 0.0
+    # 内源性阿片（β-内啡肽）相对浓度。持续疼痛会触发内源性镇痛，
+    # 这是"痛久了反而没那么难受"的生理基础。APK 元数据含 Peptide Hormones 族。
+    endorphin: float = 0.1
+    # 经期综合征（PMS/PMDD）强度 0..1，黄体后期升高，影响情绪与体感
+    pms_load: float = 0.0
+
     # ---- 行为状态（维持数值闭合的脚手架，非 APK 功能）----
     exercising: bool = False
+    # 日程驱动的运动（2026-11-14）
+    exercise_intent: str = ""       # 日程希望的运动强度 "" / mid / high
+    exercise_until: float = 0.0     # 本次运动窗口结束时刻
+    exercise_on_phase: float = 900.0   # 跑多久（秒），默认 15 分钟
+    exercise_off_phase: float = 300.0  # 歇多久（秒），默认 5 分钟
+    exercise_cycle_t: float = 0.0   # 当前间歇相位计时
+    exercise_refused: str = ""      # 上次拒绝运动的原因（展示用）
+    _next_phase_change: float = 0.0 # 下一次换相位（跑<->歇）的时刻
+    last_exercise_t: float = -99999.0  # 最近一次运动结束/进行中的时刻（乳酸清除用）
+    exercise_start_t: float = 0.0   # 本次运动开始时刻（疲劳计算用）
+
+    # ---- 延迟性肌肉酸痛 DOMS（2026-11-14 新增）----
+    # 重要：DOMS 不是乳酸引起的。乳酸几小时内就清除，而 DOMS 峰值在运动后
+    # 48-72 小时。机制是肌纤维微损伤 + 局部炎症（Hotfiel 2018）。
+    # 依据文献：
+    #   [R3] Cheung K, Hume P, Maxwell L. Delayed onset muscle soreness:
+    #        treatment strategies and performance factors. Sports Med.
+    #        2003;33(2):145-164. doi:10.2165/00007256-200333020-00005
+    #   [R4] Hotfiel T, et al. Advances in DOMS: Part I. Sportverletz Sportschaden.
+    #        2018;32(4):243-250. doi:10.1055/a-0753-1884
+    #        → "peak soreness at 48-72 h post-exercise"
+    #   [R5] Doma K, et al. The Repeated Bout Effect... J Strength Cond Res.
+    #        2023;37(12):2504-2515. doi:10.1519/JSC.0000000000004628
+    #        → 重复运动效应：一次运动后 DOMS 显著低于首次（SMD 0.51-1.23）
+    doms: float = 0.0             # 当前 DOMS 强度 0~100
+    doms_peak_at: float = 0.0     # 出现峰值的时刻（运动后 48-72h）
+    doms_decay_at: float = 0.0    # 开始衰减的时刻（峰值后）
+    doms_from_exercise: float = 0.0  # 本次触发 DOMS 的运动量（用于算峰值）
+    exercise_habit: float = 0.0   # 运动习惯 0~1，越高越不易 DOMS（重复运动效应）
     last_meal_t: float = -6 * 3600.0
     last_drink_t: float = -2 * 3600.0
     last_urine_t: float = -3 * 3600.0

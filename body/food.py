@@ -141,8 +141,9 @@ def pick_snack(rng) -> list:
 # 日程文本 -> 食物（2026-11-11 新增）
 #   麦生活的日程会写「点了一份生榨米粉配油条外卖」「黄焖鸡米饭」这类
 #   具体食物。旧实现只取 kind=meal 判断"该吃饭了"，然后按菜谱池随机配，
-#   日程里写的食物完全没进身体。这里把文本里的食物词映射到 APK 的
-#   23 项 FoodType（近似映射，不新增食物类型）。
+#   日程里写的食物完全没进身体。这里把文本里的食物词映射到食物 key：
+#   原始映射只覆盖 APK 的 23 项 FoodType；装了 food_extra.py 之后，
+#   映射表被扩展（见文件末尾的钩子），能落到 300+ 个具体食物上。
 #   顺序有意义：长词在前，避免「鸡」先命中「黄焖鸡」。
 # ----------------------------------------------------------------------
 FOOD_ALIASES = [
@@ -443,3 +444,49 @@ def combo_totals(keys) -> dict:
         for name in tot:
             tot[name] += getattr(f, name)
     return tot
+
+
+# ----------------------------------------------------------------------
+# 扩展食物库（可选）：23 项之外的中式日常饮食，见同目录 food_extra.py。
+#
+# 钩子必须放在文件末尾：此时 Food / FOODS / 各池子都已定义，扩展模块里的
+# `from .food import Food` 才不会拿到半成品模块。
+#
+# 旧写法是 `except Exception: pass` —— 扩展坏了也静默通过，看起来改好了
+# 其实什么都没变（issue 里正是踩了这个坑）。这里失败一律写 warning，
+# 并把结果记在 _FOOD_EXTRA_ADDED，便于自检：
+#   > 0  新增条数（正常；本表为 288，最终 23 -> 311）
+#   = 0  扩展存在但没有可新增的（重复安装，正常）
+#   =-1  扩展加载失败（去看日志）
+# 删掉 food_extra.py 即完全回滚；本文件除这一小段外未做任何改动。
+# ----------------------------------------------------------------------
+def _load_food_extra() -> int:
+    """加载可选扩展表，返回新增条数；-1 表示加载失败。
+
+    三种情况必须分开，否则又回到「静默失败」：
+      0    没有 food_extra.py —— 用户删掉了扩展，属正常回滚，不告警
+      > 0  装上了，追加了这么多条
+      -1   文件在但坏了 —— 写 warning，主库照常可用
+    """
+    import logging
+    from pathlib import Path
+
+    log = logging.getLogger(__name__)
+    # 先看文件在不在。不能用异常类型区分：`from . import x` 在文件缺失时
+    # 抛的是 ImportError("cannot import name ...")，不是 ModuleNotFoundError，
+    # 照类型判断会把「没装」误报成「装坏」。
+    if not Path(__file__).with_name("food_extra.py").exists():
+        return 0
+    try:
+        from . import food_extra
+    except Exception as exc:  # noqa: BLE001
+        log.warning("食物库扩展导入失败：%s: %s", type(exc).__name__, exc)
+        return -1
+    try:
+        return int(food_extra.install())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("食物库扩展安装失败：%s: %s", type(exc).__name__, exc)
+        return -1
+
+
+_FOOD_EXTRA_ADDED = _load_food_extra()

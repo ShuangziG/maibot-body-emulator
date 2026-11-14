@@ -64,14 +64,14 @@ def _pick(table, value):
 
 
 def eat_phase(gastric_ml: float) -> str:
-    """按胃内容物体积给一个体感词。阈值对应「刚吃完 / 半排空 / 快空了」。"""
+    """按胃内容物体积给一个口语化的饱腹感。"""
     if gastric_ml > 700.0:
-        return "不少东西，有点撑"
+        return "挺饱的"
     if gastric_ml > 350.0:
-        return "东西，还没消化完"
+        return "还不太饿"
     if gastric_ml > 150.0:
-        return "点东西，快排空了"
-    return "少量残渣"
+        return "差不多消化完了"
+    return "已经空了"
 
 
 def drunk_level(bac: float) -> str:
@@ -121,14 +121,15 @@ def describe(s, detail: bool = True) -> str:
     # 消化与嗜好品：这一层是 APK FoodType/AddContent/BAC 的对应物，
     # 只说「吃了什么」和「胃里还压着多少」，不说热量，避免变成营养软件。
     gut = []
-    if getattr(s, "gastric_volume", 0.0) > 60.0:
-        gut.append(f"胃里有{eat_phase(s.gastric_volume)}")
     if getattr(s, "last_meal_items", ""):
-        gut.append(f"最近一餐是{s.last_meal_items}")
+        gut.append(f"刚吃了{s.last_meal_items}")
+    # 只在胃里确实还有东西时补饱腹感；空了就别说，免得和「饥饿」一栏打架
+    if getattr(s, "gastric_volume", 0.0) > 150.0:
+        gut.append(eat_phase(s.gastric_volume))
     if gut:
         parts.append("，".join(gut))
     if getattr(s, "bac", 0.0) > 0.10:
-        parts.append(f"血液里有酒精（BAC {s.bac:.2f} g/L，{drunk_level(s.bac)}）")
+        parts.append(f"喝过点酒，{drunk_level(s.bac)}")
     if getattr(s, "caffeine", 0.0) > 40.0:
         parts.append("咖啡因还在起效")
 

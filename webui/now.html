@@ -85,7 +85,25 @@
   .lb-linkbar.err .lb-linkbar-dot{background:var(--status-crit)}
   .lb-linkbar-text{flex:1;min-width:0;color:var(--lb-fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .lb-linkbar-meta{font-size:11px;white-space:nowrap}
-  @media(max-width:720px){.lb-hospital-meta{width:100%;justify-content:flex-start}}
+  /* ---- 睡眠结构 ---- */
+  .lb-sleep-bar{display:flex;height:26px;border-radius:6px;overflow:hidden;background:var(--lb-soft);margin-top:8px}
+  .lb-sleep-bar span{display:block;height:100%;transition:width .4s ease}
+  .lb-sleep-bar span.light{background:var(--series-2)}
+  .lb-sleep-bar span.deep{background:var(--series-1)}
+  .lb-sleep-bar span.rem{background:var(--series-3)}
+  .lb-sleep-bar span.awake{background:var(--lb-muted);opacity:.35}
+
+  /* ---- 月经周期环 ---- */
+  .lb-cycle-wrap{display:flex;align-items:center;gap:16px;margin-top:6px}
+  .lb-cycle-ring{width:96px;height:96px;border-radius:50%;flex:0 0 auto;position:relative;
+    background:conic-gradient(var(--series-1) 0turn, var(--series-2) 0.5turn, var(--series-3) 1turn);
+    display:flex;align-items:center;justify-content:center}
+  .lb-cycle-ring::after{content:'';position:absolute;inset:11px;border-radius:50%;background:var(--lb-card)}
+  .lb-cycle-ring b{position:relative;z-index:1;font-size:15px;font-weight:700;color:var(--lb-fg)}
+  .lb-cycle-info{flex:1;min-width:0}
+
+  @media(max-width:720px){.lb-hospital-meta{width:100%;justify-content:flex-start}
+    .lb-cycle-wrap{flex-direction:column;align-items:flex-start}}
 </style>
 <div class="maibot-page lb-root" id="lb-now-root">
   <header class="lb-topbar">
@@ -150,6 +168,36 @@
 
     <section>
       <div class="lb-vitals" id="vitals"></div>
+    </section>
+  </div>
+
+  <div class="lb-grid" style="grid-template-columns:1.4fr 1fr;margin-bottom:14px" id="sleep-cycle-grid">
+    <section class="lb-card">
+      <div class="lb-card-hd"><h2>睡眠结构</h2><span class="lb-card-sub" id="sl-stage">—</span></div>
+      <div class="lb-gut-row"><span>当前周期</span><b id="sl-cycle">—</b></div>
+      <div class="lb-sleep-bar" id="sl-bar"></div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px">
+        <div><div class="lb-vital-label">浅睡</div><div class="lb-vital-value" id="sl-light">0<span class="lb-vital-unit">h</span></div></div>
+        <div><div class="lb-vital-label">深睡</div><div class="lb-vital-value" id="sl-deep">0<span class="lb-vital-unit">h</span></div></div>
+        <div><div class="lb-vital-label">快速眼动</div><div class="lb-vital-value" id="sl-rem">0<span class="lb-vital-unit">h</span></div></div>
+      </div>
+      <div class="lb-gut-row" style="margin-top:10px"><span>睡眠质量</span><b id="sl-quality">—</b></div>
+      <div class="lb-gut-row"><span>睡眠债</span><b id="sl-debt">—</b></div>
+      <div class="lb-card-sub" id="sl-note" style="margin-top:8px"></div>
+    </section>
+    <section class="lb-card" id="cycle-card">
+      <div class="lb-card-hd"><h2>月经周期</h2><span class="lb-card-sub" id="cy-phase">—</span></div>
+      <div class="lb-cycle-wrap">
+        <div class="lb-cycle-ring" id="cy-ring"></div>
+        <div class="lb-cycle-info">
+          <div class="lb-gut-row"><span>周期日</span><b id="cy-day">—</b></div>
+          <div class="lb-gut-row"><span>子宫相位</span><b id="cy-uterus">—</b></div>
+          <div class="lb-gut-row"><span>雌激素</span><b id="cy-e2">—</b></div>
+          <div class="lb-gut-row"><span>孕激素</span><b id="cy-p4">—</b></div>
+          <div class="lb-gut-row"><span>疼痛</span><b id="cy-pain">—</b></div>
+        </div>
+      </div>
+      <div class="lb-card-sub" id="cy-note" style="margin-top:8px"></div>
     </section>
   </div>
 
@@ -390,6 +438,109 @@
     }
   }
 
+  function renderSleep(d) {
+    var sl = d.sleep || {};
+    var stageZh = { awake: '清醒', light: '浅睡', deep: '深睡', rem: '快速眼动' };
+    // 强制睡眠（微睡眠）单独提示
+    if (sl.forced_sleep) {
+      txt('sl-stage', '强制睡眠中 · 已连续清醒 ' + num(sl.awake_hours, 1) + ' 小时');
+    } else {
+      txt('sl-stage', sl.sleeping
+        ? (stageZh[sl.stage] || sl.stage) + ' · 第 ' + (Number(sl.cycle_index) || 0) + ' 周期'
+        : '清醒中');
+    }
+    txt('sl-cycle', sl.sleeping
+      ? '周期进度 ' + Math.round((Number(sl.cycle_pos) || 0) * 100) + '%'
+      : '—');
+    // 睡眠结构条：四段占比
+    var bar = $('sl-bar');
+    if (bar) {
+      var segs = [
+        ['light', sl.light_pct], ['deep', sl.deep_pct], ['rem', sl.rem_pct]
+      ];
+      var totalPct = segs.reduce(function (a, s) { return a + (Number(s[1]) || 0); }, 0);
+      if (totalPct <= 0) {
+        bar.innerHTML = '<span class="awake" style="width:100%"></span>';
+      } else {
+        bar.innerHTML = segs.map(function (s) {
+          return '<span class="' + s[0] + '" style="width:' + (Number(s[1]) || 0) + '%"></span>';
+        }).join('');
+      }
+    }
+    var hasSleep = (Number(sl.light_h) || 0) + (Number(sl.deep_h) || 0) + (Number(sl.rem_h) || 0) > 0;
+    txt('sl-light', hasSleep ? num(sl.light_h, 1) + 'h' : '—');
+    txt('sl-deep', hasSleep ? num(sl.deep_h, 1) + 'h' : '—');
+    txt('sl-rem', hasSleep ? num(sl.rem_h, 1) + 'h' : '—');
+    var q = Number(sl.quality) || 0;
+    txt('sl-quality', q > 0 ? q + ' 分' : '—');
+    txt('sl-debt', num(sl.debt_h, 1) + ' 小时');
+    // 夜间醒来：总次数 + 分类明细
+    var wc = Number(sl.wake_count) || 0;
+    if (wc > 0) {
+      var wp = [];
+      if (Number(sl.wake_by_message) > 0) wp.push('消息 ' + sl.wake_by_message);
+      if (Number(sl.wake_by_thirst) > 0) wp.push('口渴 ' + sl.wake_by_thirst);
+      if (Number(sl.wake_by_bladder) > 0) wp.push('起夜 ' + sl.wake_by_bladder);
+      var wd = wp.length ? '（' + wp.join(' / ') + '）' : '';
+      txt('sl-wake', wc + ' 次' + wd + (sl.wake_pending ? ' · 等重新入睡' : ''));
+    } else {
+      txt('sl-wake', '无');
+    }
+    var note = $('sl-note');
+    if (note) {
+      if (q <= 0) {
+        note.textContent = '将在第一次睡眠后记录。';
+      } else if (q >= 80) {
+        note.textContent = '睡眠结构良好：深睡与 REM 占比均在健康区间。';
+      } else if (q >= 60) {
+        note.textContent = '睡眠尚可，时长或深睡比例略偏离参考值。';
+      } else {
+        note.textContent = '睡眠质量偏低：深睡不足或有中途清醒，睡眠债难以还清。';
+      }
+    }
+  }
+
+  function renderCycle(d) {
+    // 月经周期关闭时整块隐藏，不留空壳
+    var wrap = $('cycle-card');
+    if (!d.cycle_enabled) {
+      if (wrap) wrap.style.display = 'none';
+      return;
+    }
+    if (wrap) wrap.style.display = '';
+    var cy = d.cycle || {};
+    txt('cy-phase', cy.phase_text || '—');
+    txt('cy-day', num(cy.day, 1) + ' / ' + num(cy.length, 0) + ' 天');
+    txt('cy-uterus', cy.uterus_text || '—');
+    txt('cy-e2', num(cy.estrogen, 2));
+    txt('cy-p4', num(cy.progesterone, 2));
+    var pain = Number(cy.pain) || 0;
+    txt('cy-pain', pain > 0 ? num(pain, 1) + ' / 100' : '无');
+    // 周期环：按当前日占周期比例旋转高亮
+    var ring = $('cy-ring');
+    if (ring) {
+      var ratio = Math.max(0, Math.min(1, (Number(cy.day) || 0) / Math.max(1, Number(cy.length) || 28)));
+      ring.style.background = 'conic-gradient(from -90deg, var(--series-1) 0turn, var(--series-1) ' +
+        ratio + 'turn, var(--lb-soft) ' + ratio + 'turn, var(--lb-soft) 1turn)';
+      ring.innerHTML = '<b>' + Math.round(ratio * 100) + '%</b>';
+    }
+    var note = $('cy-note');
+    if (note) {
+      var base;
+      if (cy.menstruating) {
+        base = '行经期：前列腺素升高引起痛经，疼痛强度按 ES 敏感度调制。';
+      } else if (cy.phase === 'ovulation') {
+        base = '排卵期：雌激素达峰，基础体温在排卵后上移。';
+      } else if (cy.phase === 'luteal') {
+        base = '黄体期：孕激素升高，基础体温处于高位。';
+      } else {
+        base = '卵泡期：雌激素逐步上升，为排卵做准备。';
+      }
+      // 相位依据（按现实日历 / 从启用时刻累加），日期填错时也会在这里说清楚
+      note.textContent = cy.anchor_note ? base + ' ' + cy.anchor_note + '。' : base;
+    }
+  }
+
   function renderSpeech(d) {
     var sp = d.speech || {};
     txt('speech', sp.describe || '—');
@@ -519,6 +670,8 @@
       renderVitals(STATE.now);
       renderFeelings(STATE.now);
       renderGut(STATE.now);
+      renderSleep(STATE.now);
+      renderCycle(STATE.now);
       renderSpeech(STATE.now);
       renderEvents(STATE.now);
       txt('hdr-version', 'v' + (STATE.now.version || '?'));

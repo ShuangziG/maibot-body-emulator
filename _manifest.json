@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "id": "maibot-body-emulator",
   "name": "麦麦身体",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "让麦麦有一副真实运转的身体：心血管、呼吸、代谢、肾脏、内分泌、体温与消化道连续仿真，可在 WebUI 里查看体征曲线、内脏细则与进食记录",
   "author": {
     "name": "Evil双子",

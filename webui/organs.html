@@ -85,6 +85,10 @@
   .lb-linkbar.err .lb-linkbar-dot{background:var(--status-crit)}
   .lb-linkbar-text{flex:1;min-width:0;color:var(--lb-fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .lb-linkbar-meta{font-size:11px;white-space:nowrap}
+  .lb-wave-wrap{margin-top:6px}
+  .lb-wave-label{font-size:12px;color:var(--lb-muted);margin-bottom:4px}
+  .lb-wave-label span{color:var(--lb-fg);margin-left:6px}
+  .lb-wave{width:100%;height:90px;display:block;background:var(--lb-soft);border-radius:6px}
   @media(max-width:720px){.lb-hospital-meta{width:100%;justify-content:flex-start}}
 </style>
 <div class="maibot-page lb-root" id="lb-organs-root">
@@ -108,6 +112,21 @@
   </header>
 
   <div class="lb-err" id="err"><strong>数据异常：</strong><span id="err-text"></span></div>
+
+  <section class="lb-card" id="wave-card" style="margin-bottom:14px">
+    <div class="lb-card-hd">
+      <h2>生理波形</h2>
+      <span class="lb-card-sub" id="wave-note">仿真数据，非医学测量</span>
+    </div>
+    <div class="lb-wave-wrap">
+      <div class="lb-wave-label">ECG 心电 <span id="wave-ecg-meta">—</span></div>
+      <canvas class="lb-wave" id="wave-ecg" height="90"></canvas>
+    </div>
+    <div class="lb-wave-wrap" style="margin-top:10px">
+      <div class="lb-wave-label">EEG 脑电 <span id="wave-eeg-meta">—</span></div>
+      <canvas class="lb-wave" id="wave-eeg" height="90"></canvas>
+    </div>
+  </section>
 
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px" id="tabs"></div>
   <div class="lb-grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));margin-bottom:14px" id="groups"></div>
@@ -243,6 +262,197 @@
     }
   }
 
+  // ---- 生理波形（ECG / EEG）----
+  // 用扫描式渲染：数据一次取 20 秒，前端按时间轴滚动显示 8 秒窗口，
+  // 视觉上是连续的（像监护仪），不是每 2 秒闪一下。
+  // ---- 波形数据池 ----
+  // 一次取 20 秒，数据池带绝对起点 t0，前端按墙钟索引「现在之前 8 秒」。
+  // 每次换批时新缓冲区的起点正好接上旧缓冲区当前窗口，所以看不出接缝。
+  var WAVE = {
+    ecg: [], eeg: [],
+    ecgHz: 100, eegHz: 200,
+    ecgMeta: '', eegMeta: '',
+    t0: 0,             // 数据池第一个采样点的 epoch 秒（仅作「后端支持墙钟」的标记）
+    lead: 8,           // 数据池起点比「拉取时刻」早多少秒，后端给
+    fetchedAt: 0,
+    fetching: false,   // 关键：正在请求时不再发起第二次
+    failed: false,     // 上一次拉取失败（退避期内不重试）
+    retryAt: 0,        // 失败退避到期时间：没有这个，墙钟判定会每帧重发请求
+  };
+
+  var WAVE_WINDOW_SEC = 8;    // 屏幕上显示多少秒的波形
+  // 后端缓冲区是 [拉取时刻-8s, 拉取时刻+12s]（20 秒），所以用到 10 秒
+  // 就该预取下一批，留 2 秒给请求往返。超出后窗口会停在缓冲区末尾。
+  var WAVE_REFETCH_MS = 10000;
+
+  function waveColors() {
+    var cs = getComputedStyle(document.documentElement);
+    return {
+      ecg: cs.getPropertyValue('--series-3').trim() || '#e74c3c',
+      eeg: cs.getPropertyValue('--series-1').trim() || '#5c6bc0',
+      grid: 'rgba(128,128,128,0.15)',
+    };
+  }
+
+  async function loadWaveforms() {
+    // 并发保护：宿主限制同时只能有 2 个请求。
+    // 旧实现里 waveLoop 每帧都可能调进来，于是同时发多个请求 →
+    // 报 "Two requests are already running"。
+    if (WAVE.fetching) return;
+    WAVE.fetching = true;
+    try {
+      var res = await window.maibot.query('waveforms', { seconds: 20 });
+      if (!res || res.success === false) {
+        // 失败必须置退避，否则墙钟判定（sinceFetch > 10s）会每帧重发请求
+        WAVE.failed = true;
+        WAVE.retryAt = Date.now() + 4000;
+        txt('wave-note', '波形不可用：' + ((res && res.error) || '未知') + '（完全重启 MaiBot 服务后生效）');
+        return;
+      }
+      var ecg = res.ecg || {};
+      var eeg = res.eeg || {};
+      WAVE.ecg = ecg.points || [];
+      WAVE.eeg = eeg.points || [];
+      WAVE.ecgHz = ecg.hz || 100;
+      WAVE.eegHz = eeg.hz || 200;
+      // 时间基准：后端返回缓冲区起点的 epoch 秒与超前量 lead。
+      // 注意**不比较浏览器与后端的绝对时钟** —— 从另一台设备打开接线板时
+      // 两边时钟可能差几分钟，那样窗口会夹死在缓冲区边缘、波形冻住。
+      // 只用「距本次拉取过了多久」+ lead 推算，天然免疫时钟偏差。
+      WAVE.t0 = Number(res.t0) || 0;
+      WAVE.lead = Number(res.lead) > 0 ? Number(res.lead) : 8;
+      WAVE.fetchedAt = Date.now();
+
+      txt('wave-ecg-meta', (ecg.bpm || '?') + ' bpm · RR ' + (ecg.rr_ms || '?') + ' ms · ' + (ecg.hz || '?') + ' Hz');
+      var bands = eeg.bands || {};
+      var stageZh = { awake: '清醒', light: '浅睡', deep: '深睡', rem: 'REM' };
+      txt('wave-eeg-meta', (stageZh[eeg.stage] || eeg.stage || '?') +
+        ' · δ' + (bands.delta != null ? bands.delta.toFixed(2) : '?') +
+        ' θ' + (bands.theta != null ? bands.theta.toFixed(2) : '?') +
+        ' α' + (bands.alpha != null ? bands.alpha.toFixed(2) : '?') +
+        ' β' + (bands.beta != null ? bands.beta.toFixed(2) : '?'));
+      txt('wave-note', res.disclaimer || '仿真波形，非医学数据');
+
+      WAVE.failed = false;
+      // 注意：这里**不启动** waveLoop。循环由 boot() 统一启动一次，
+      // 旧实现在这里又 requestAnimationFrame 一次，导致每加载一轮就多一个
+      // 并行的 waveLoop，循环数指数增长，最终撞上宿主并发限制。
+    } catch (e) {
+      // 失败后标记 + 退避，避免每帧都重试把请求队列打满
+      WAVE.failed = true;
+      WAVE.retryAt = Date.now() + 4000;
+      txt('wave-note', '波形拉取失败：' + (e && e.message ? e.message : e) + '（完全重启 MaiBot 服务后生效）');
+    } finally {
+      WAVE.fetching = false;
+    }
+  }
+
+  // 从数据池里按「当前时间」取一段窗口，画成扫描式波形
+  function renderScan(canvasId, pool, sampleHz, color, elapsedSec) {
+    var cv = $(canvasId);
+    if (!cv || !pool || pool.length < 2) return;
+    var ctx = cv.getContext('2d');
+    var dpr = window.devicePixelRatio || 1;
+    var w = cv.clientWidth || 600;
+    var h = cv.clientHeight || 90;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+      cv.width = Math.round(w * dpr);
+      cv.height = Math.round(h * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    var mid = h / 2, amp = h * 0.44;
+    var colors = waveColors();
+
+    // 网格：竖线每秒一条，像监护仪
+    ctx.strokeStyle = colors.grid;
+    ctx.lineWidth = 1;
+    for (var s = 1; s < WAVE_WINDOW_SEC; s++) {
+      var gx = (s / WAVE_WINDOW_SEC) * w;
+      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke();
+    }
+    // 中线
+    ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke();
+
+    // 取窗口：屏幕右缘是「现在」，所以显示 [现在-WINDOW, 现在]。
+    // 优先用墙钟索引（数据池带绝对起点 t0）——这样波形是真在流动，
+    // 且每次换批时窗口正好接上上一批，看不出接缝。
+    // 老后端没有 t0 时退回原来的 elapsed 循环播放，页面不会因此崩掉。
+    var n = pool.length;
+    var totalSec = n / sampleHz;
+    var startSec;
+    if (WAVE.t0 > 0) {
+      // 缓冲区起点 = 拉取时刻 - lead，所以「现在」在缓冲区里的位置是
+      //   (已过秒数) + lead；窗口 = 它往前 WAVE_WINDOW_SEC 秒。
+      var sinceSec = (Date.now() - WAVE.fetchedAt) / 1000;
+      startSec = sinceSec + WAVE.lead - WAVE_WINDOW_SEC;
+    } else {
+      startSec = elapsedSec % Math.max(0.001, totalSec - WAVE_WINDOW_SEC);
+    }
+    if (startSec < 0) startSec = 0;
+    var maxStart = totalSec - WAVE_WINDOW_SEC;
+    if (maxStart > 0 && startSec > maxStart) startSec = maxStart;
+    var i0 = Math.floor(startSec * sampleHz);
+    var i1 = Math.min(n - 1, Math.floor((startSec + WAVE_WINDOW_SEC) * sampleHz));
+    if (i1 - i0 < 2) return;
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.4;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (var i = i0; i <= i1; i++) {
+      var x = ((i - i0) / (i1 - i0)) * w;
+      var y = mid - pool[i] * amp;
+      if (i === i0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // 扫描光标：右侧亮线
+    var cursorX = w - 1;
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(cursorX, 0); ctx.lineTo(cursorX, h); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  var waveStart = 0;
+  var waveLoopRunning = false;   // 唯一实例保护
+
+  function waveLoop(ts) {
+    // 页面不可见 / 已卸载时停掉动画，避免后台空转烧 CPU。
+    // 清 waveLoopRunning 后，visibilitychange 或 boot 才能重新启动它。
+    if (document.hidden || !document.getElementById('wave-ecg')) {
+      waveLoopRunning = false;
+      waveStart = 0;
+      return;
+    }
+    waveLoopRunning = true;
+    if (!waveStart) waveStart = ts;
+    var elapsed = (ts - waveStart) / 1000;
+    var c = waveColors();
+    renderScan('wave-ecg', WAVE.ecg, WAVE.ecgHz, c.ecg, elapsed);
+    renderScan('wave-eeg', WAVE.eeg, WAVE.eegHz, c.eeg, elapsed);
+
+    // 数据快用完时预取下一批。
+    // 有墙钟基准时按「距上次拉取多久」判断（缓冲区只覆盖到 +12s），
+    // 否则退回旧的 elapsed>16 判断。
+    // WAVE.fetching / WAVE.failed 是防重复触发：旧实现在这里每帧都调
+    // loadWaveforms，请求没返回就会并发发多个，撞上宿主「同时最多 2 个请求」。
+    var nowMs = Date.now();
+    var sinceFetch = nowMs - WAVE.fetchedAt;
+    var dueForNext = WAVE.t0 > 0 ? (sinceFetch > WAVE_REFETCH_MS) : (elapsed > 16);
+    // 失败退避期内先不重发，到期后自动恢复（不再需要用户手动刷新）
+    var backedOff = WAVE.failed && nowMs < WAVE.retryAt;
+    if (dueForNext && !WAVE.fetching && !backedOff) {
+      waveStart = ts;          // 用当前帧时间重置，而不是 0（0 会被当成未初始化）
+      WAVE.failed = false;     // 允许本次重试；再失败会在 catch 里重新置位
+      loadWaveforms();         // 加载完成后数据池自动更新，循环继续跑
+    }
+    requestAnimationFrame(waveLoop);
+  }
+
   async function loadOrgans() {
     try {
       var res = await window.maibot.query('organs', {});
@@ -273,10 +483,52 @@
   function boot() {
     var n = $('btn-now'); if (n) n.addEventListener('click', function () { window.maibot.navigate('now', {}); });
     var t = $('btn-timeline'); if (t) t.addEventListener('click', function () { window.maibot.navigate('timeline', {}); });
-    var r = $('btn-refresh'); if (r) r.addEventListener('click', function () { loadOrgans(); loadFoods(); });
-    loadOrgans();
-    loadFoods();
-    setInterval(loadOrgans, 15000);
+    // ---- 串行加载 ----
+    // 宿主前端硬限制：所有 maibot.query / action / navigate 加起来，
+    // 同时 pending 的请求数 >= 2 就直接拒绝并抛
+    // "Two requests are already running"（plugin-webui-BPNBEuKj.js:35）。
+    // 旧实现 boot 时连发三个查询（organs/foods/waveforms），
+    // 前两个没回来第三个必炸。这里改成串行：一个完成再发下一个。
+    var loading = false;
+
+    async function loadAll() {
+      if (loading) return;          // 防止刷新按钮和定时器撞车
+      loading = true;
+      try {
+        await loadOrgans();
+        await loadFoods();
+        await loadWaveforms();
+      } catch (e) {
+        // 各 load 内部已各自 try/catch，这里只兜底
+        console.warn('页面加载异常', e);
+      } finally {
+        loading = false;
+      }
+    }
+
+    var r = $('btn-refresh');
+    if (r) r.addEventListener('click', function () { loadAll(); });
+
+    loadAll();
+
+    // 定时刷新同样走串行入口，避免与手动刷新或波形预取撞车
+    setInterval(function () {
+      if (!loading && !document.hidden) loadAll();
+    }, 15000);
+    // 动画循环只在这里启动一次。旧实现在 loadWaveforms() 成功时、
+    // 以及 visibilitychange 里都各自 requestAnimationFrame(waveLoop)，
+    // 于是每加载一轮数据就多一个并行循环，指数增长后撞上宿主并发限制
+    // （Two requests are already running）。现在统一从这里起，只起一次。
+    if (!waveLoopRunning) { requestAnimationFrame(waveLoop); }
+
+    // 从后台切回来时恢复动画（同样只在没有实例时启动）
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden && !waveLoopRunning && WAVE.ecg.length) {
+        waveStart = 0;
+        requestAnimationFrame(waveLoop);
+      }
+    });
+
     window.addEventListener('maibot:context', function (ev) {
       var ctx = ev && ev.detail;
       if (!ctx) return;

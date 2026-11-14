@@ -114,7 +114,7 @@
     {
       "id": "organs",
       "title": "内脏与食物库",
-      "description": "82 个生理字段按器官分组，以及 23 项 FoodType 的成分表与三餐候选池",
+      "description": "82 个生理字段按器官分组，以及 311 种食物（23 项 FoodType + 288 项中式扩展）的成分表与三餐候选池",
       "placement": "sidebar",
       "icon": "database",
       "mode": "custom",
@@ -128,6 +128,18 @@
         "foods": {
           "api": "webui_foods",
           "version": "1"
+        },
+        "waveforms": {
+          "api": "webui_waveforms",
+          "version": "1",
+          "parameters": {
+            "seconds": {
+              "type": "number",
+              "minimum": 3,
+              "maximum": 30,
+              "required": false
+            }
+          }
         }
       }
     }
