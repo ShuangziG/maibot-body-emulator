@@ -41,6 +41,29 @@ ACTIVITY_LEVEL = {
 
 MEAL_KINDS = {"meal": ""}
 
+# ---- 麦织（MaiWeave）适配（2026-11-15）----
+# 两个日程插件的公开 API 不同名、字段也不同：
+#   麦生活  get_life_state + get_current_scene（sleep_phase / current.kind|summary）
+#   麦织    get_life_status 单个只读 API（sleeping|quiet / current.kind|title）
+# 这里只做单向读取，不改麦织任何东西；字段映射不全就留中性值，绝不猜。
+LIFE_PLUGIN_ID = "maibot-community.mai-life"
+WEAVE_PLUGIN_ID = "ilworkcn.maiweave"
+
+# 麦织的 plan kind（core/models.py 的 Kind）到活动强度。麦生活没有
+# cook / social / diary 三种，这里补上，其余与 ACTIVITY_LEVEL 同量级。
+WEAVE_ACTIVITY = {
+    "sleep": 0.0,
+    "rest": 0.05,
+    "diary": 0.05,
+    "meal": 0.10,
+    "cook": 0.15,
+    "leisure": 0.15,
+    "social": 0.20,
+    "study": 0.25,
+    "work": 0.35,
+    "travel": 0.45,
+}
+
 # 日程摘要里的餐段关键词。麦生活的 summary 是自由文本（"洗漱并吃早餐"/
 # "准备午饭"/"准备晚饭"），必须按关键词认出是哪一顿。
 # 旧实现直接用身体钟点反推，结果凌晨 00:06 端出一份午饭套餐。
@@ -73,8 +96,20 @@ class LifeLink:
     def enabled(self) -> bool:
         return bool(self._cfg.enabled)
 
+    def _provider(self) -> str:
+        """联动对象：life（麦生活）/ weave（麦织）。"""
+
+        p = str(getattr(self._cfg, "provider", "life") or "life").strip().lower()
+        return "weave" if (p.startswith("weave") or p in ("麦织", "maiweave")) else "life"
+
     def _plugin_id(self) -> str:
-        return str(getattr(self._cfg, "host_plugin_id", "") or "maibot-community.mai-life")
+        if self._provider() == "weave":
+            explicit = str(getattr(self._cfg, "host_plugin_id", "") or "")
+            # 填的还是麦生活的默认 ID 就等于没填：切到麦织后不该再往麦生活打。
+            if not explicit or explicit == LIFE_PLUGIN_ID:
+                return WEAVE_PLUGIN_ID
+            return explicit
+        return str(getattr(self._cfg, "host_plugin_id", "") or LIFE_PLUGIN_ID)
 
     async def _call(self, api_name: str, **args: Any) -> Any:
         """调麦生活的公开 API；任何失败都返回 None，不抛。"""
@@ -103,6 +138,9 @@ class LifeLink:
         if self._cache and (now - self._last_pull) < interval:
             return self._cache
         self._last_pull = now
+
+        if self._provider() == "weave":
+            return await self._pull_weave(now)
 
         state = await self._call("get_life_state")
         if not isinstance(state, dict) or not state:
@@ -134,6 +172,59 @@ class LifeLink:
             "mood": float(state.get("mood_valence") or 0.0),
             "activity_text": str(state.get("current_activity") or ""),
             "ts": now,
+        }
+        self._cache = norm
+        return norm
+
+    # ------------------------------------------------------------------
+    async def _pull_weave(self, now: float) -> dict[str, Any]:
+        """拉一次麦织状态，规范化成与麦生活同一套字段。
+
+        映射原则：拿得到就映射，拿不到就留中性（0 / 空串），
+        绝不替麦织宣布"她醒着"或"她在活动"——那会让身体偏离事实。
+        """
+
+        status = await self._call("get_life_status")
+        if not isinstance(status, dict) or not status:
+            return {}
+        if not status.get("ready") or not status.get("enabled"):
+            # 麦织没就绪或生活引擎关闭：返回空，调用方保持上次注入值。
+            return {}
+
+        current = status.get("current") or {}
+        kind = str(current.get("kind") or "")
+        summary = str(current.get("title") or "")
+
+        # 麦织没有 sleep_phase，只有三个布尔/时间字段。
+        # quiet（安静睡眠）比 sleeping（睡着）更强：quiet 时按深睡算。
+        quiet = status.get("quiet")
+        sleeping = status.get("effective_sleeping")
+        if sleeping is None:
+            sleeping = status.get("sleeping")
+        if quiet:
+            phase, sleep = "deep_sleep", 1.0
+        elif sleeping:
+            phase, sleep = "light_sleep", 0.65
+        else:
+            phase, sleep = "awake", 0.0
+
+        activity = WEAVE_ACTIVITY.get(kind, 0.0) if kind else 0.0
+
+        norm = {
+            "sleep": sleep,
+            "activity": activity,
+            "phase": phase,
+            "kind": kind,
+            "summary": summary,
+            "location": str(status.get("location") or current.get("location") or ""),
+            # 麦织的 energy 是 0~100、mood 是 -5~5，与麦生活的量纲不同。
+            # 量纲不明的字段一律不透传，避免把身体的心率/心境带偏。
+            "energy": 0.0,
+            "hunger": 0.0,
+            "mood": 0.0,
+            "activity_text": summary,
+            "ts": now,
+            "provider": "weave",
         }
         self._cache = norm
         return norm
@@ -179,6 +270,9 @@ class LifeLink:
         if not self.enabled or not bool(getattr(self._cfg, "sync_meal", False)):
             return "", "", "", []
 
+        if self._provider() == "weave":
+            return await self._meal_trigger_weave(hour)
+
         scene = await self._call("get_current_scene")
         current = (scene or {}).get("current") or {}
         if str(current.get("kind") or "") != "meal":
@@ -215,6 +309,33 @@ class LifeLink:
         return slot, key, summary, items
 
     # ------------------------------------------------------------------
+    async def _meal_trigger_weave(self, hour: float) -> tuple[str, str, str, list]:
+        """麦织版的三餐触发：结构对齐 meal_trigger，去重键用 plan id + start。
+
+        麦织的 plan 自带 ISO 起止时间与唯一 id，比麦生活按"日 + 分钟"拼键更可靠。
+        """
+
+        status = await self._call("get_life_status")
+        if not isinstance(status, dict) or not status.get("ready"):
+            return "", "", "", []
+        current = status.get("current") or {}
+        if str(current.get("kind") or "") != "meal":
+            return "", "", "", []
+
+        summary = str(current.get("title") or "")
+        key = f"weave|{current.get('id') or ''}|{current.get('start') or ''}"
+        if key == self._last_meal_key:
+            return "", "", "", []
+        self._last_meal_key = key
+
+        slot = self.meal_slot_for("meal", hour, summary)
+        items: list = []
+        try:
+            items = food.parse_menu(summary, limit=6)
+        except Exception:  # noqa: BLE001 - 解析失败就交给引擎按餐段配
+            items = []
+        return slot, key, summary, items
+
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     # 室外天气（2026-11-14 新增）
@@ -383,6 +504,8 @@ class LifeLink:
 
         return {
             "enabled": self.enabled,
+            "provider": self._provider(),
+            "plugin_id": self._plugin_id(),
             "sync_activity": bool(getattr(self._cfg, "sync_activity", False)),
             "sync_meal": bool(getattr(self._cfg, "sync_meal", False)),
             "inject_state": bool(getattr(self._cfg, "inject_state", False)),

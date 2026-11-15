@@ -129,6 +129,10 @@ def pick_meal(slot: str, rng) -> list:
     return list(rng.choice(pool))
 
 
+# 饮品留空时的兜底（2026-11-15）：不再从 DRINK_POOL 随机抽，按白水记。
+DEFAULT_DRINK_KEY = "Water"
+
+
 def pick_drink(rng) -> list:
     return [rng.choice(DRINK_POOL)]
 

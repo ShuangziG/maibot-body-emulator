@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections import deque
 from datetime import datetime
@@ -31,6 +32,7 @@ from .body.food import (
     _FOOD_EXTRA_ADDED,
     ALL_FOODS,
     DRINK_POOL,
+    FOOD_ALIASES,
     FOODS,
     MEAL_POOLS,
     SNACK_POOL,
@@ -43,7 +45,7 @@ from .body.translate import FEELING_LEVELS, drunk_level, eat_phase, phase
 from .config import LifeBodyConfig
 from .link import LifeLink
 
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.2.0"
 H2S = 3600.0
 SAVE_FILE = "body_state.json"
 
@@ -220,6 +222,9 @@ class LifeBodyPlugin(MaiBotPlugin):
         self._task: asyncio.Task | None = None
         self._samples: deque[dict[str, Any]] = deque(maxlen=2200)
         self._events: deque[dict[str, Any]] = deque(maxlen=800)
+        # 跨插件写接口的 request_id 幂等窗口（防重复记账）
+        self._drink_seen: deque[str] = deque(maxlen=256)
+        self._meal_seen: deque[str] = deque(maxlen=256)
         self._last_step_wall = 0.0
         self._last_save_wall = 0.0
         self._started_at = 0.0
@@ -572,6 +577,8 @@ class LifeBodyPlugin(MaiBotPlugin):
             "phase": "",
             "summary": "",
             "last_error": "",
+            "provider": "",
+            "plugin_id": "",
         }
         if link is not None:
             try:
@@ -583,6 +590,9 @@ class LifeBodyPlugin(MaiBotPlugin):
                 "phase": str(status.get("phase") or ""),
                 "summary": str(status.get("summary") or ""),
                 "last_error": str(status.get("last_error") or ""),
+                # 当前联动的是哪个日程插件，WebUI 据此显示「麦织 / 麦生活」
+                "provider": str(status.get("provider") or ""),
+                "plugin_id": str(status.get("plugin_id") or ""),
             })
         return view
 
@@ -1498,6 +1508,421 @@ class LifeBodyPlugin(MaiBotPlugin):
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
 
+    # ===== 给其他插件的公开 API（2026-11-15，醉酒插件请求）=====
+    # 说明：@API(public=True) 才会被别的插件用 api.call 调到。
+    # 只读接口不做任何副作用；写入接口复用 engine.feed，不新增生理模型。
+
+    @API(name="drunk_snapshot", description="只读：醉酒相关的身体快照（血乙醇、睡眠、迟钝度、最近吃喝）", version="1", public=True)
+    async def drunk_snapshot(self, **kwargs: Any) -> dict[str, Any]:
+        """只读快照，供醉酒/暧昧类插件做表达判断。纯读，不推进仿真、不落盘。"""
+
+        del kwargs
+        if not self._ready or self._engine is None:
+            return {"ok": False, "version": 1, "error": "身体尚未就绪"}
+
+        s = self._s
+        bac = float(getattr(s, "bac", 0.0) or 0.0)
+        # 迟钝度是推导值：血乙醇越高越迟钝（0~1）。BodyState 没有独立字段，
+        # 这里只做单调映射，不引入新的生理模型；对端拿不到时可自行忽略。
+        sluggish = min(1.0, max(0.0, bac / 0.8))
+        return {
+            "ok": True,
+            "version": 1,
+            "world_t": float(s.t),
+            "wall_t": float(time.time()),
+            "clock_offset_h": float(getattr(self._engine, "clock_offset", 0.0) or 0.0),
+            "bac": round(bac, 4),
+            "chyme_alcohol": round(float(getattr(s, "chyme_alcohol", 0.0) or 0.0), 3),
+            "glucose": round(float(s.glucose), 2),
+            "energy": round(float(s.energy), 2),
+            "hunger": round(float(s.hunger), 2),
+            "thirst": round(float(s.thirst), 2),
+            "sleeping": bool(s.sleeping),
+            "sleep_stage": str(getattr(s, "sleep_stage", "awake") or "awake"),
+            "sleep_debt": round(float(getattr(s, "sleep_debt", 0.0) or 0.0), 2),
+            # BodyState 目前没有断片模型：恒为 False，字段位保留给以后的版本。
+            "passed_out": False,
+            "passed_out_at": 0.0,
+            "sluggish": round(sluggish, 3),
+            "drinks": int(getattr(s, "drinks", 0) or 0),
+            "last_drink_items": str(getattr(s, "last_drink_items", "") or ""),
+            "last_meal_items": str(getattr(s, "last_meal_items", "") or ""),
+            "last_meal_t": float(getattr(s, "last_meal_t", 0.0) or 0.0),
+        }
+
+    @API(name="log_drink", description="写入：把一次饮酒/饮水记进身体（幂等、支持份量）", version="1", public=True)
+    async def log_drink(self, items: str = "", kind: str = "drink", portion: float = 1.0,
+                        note: str = "", request_id: str = "", **kwargs: Any) -> dict[str, Any]:
+        """跨插件记账：她自己喝了一口、剧情里已经喝下，都走这里。
+
+        复用 engine.feed（与 body_eat 工具同一条消化管线），不另算营养。
+        认不出的词不报错，列进 unknown。
+        """
+
+        del kwargs
+        if not self._ready or self._engine is None:
+            return {"ok": False, "version": 1, "error": "身体尚未就绪"}
+
+        rid = str(request_id or "").strip()
+        if rid and rid in self._drink_seen:
+            return {"ok": True, "version": 1, "duplicate": True, "request_id": rid}
+
+        try:
+            p = float(portion)
+        except (TypeError, ValueError):
+            p = 1.0
+        p = max(0.05, min(3.0, p))
+
+        raw = [x.strip() for x in str(items or "").replace("，", ",").split(",") if x.strip()]
+        resolved: list[str] = []
+        unknown: list[str] = []
+        for token in raw:
+            if token in FOODS and getattr(FOODS[token], "selectable", True):
+                resolved.append(token)
+                continue
+            guess = parse_menu(token, limit=4)
+            if guess:
+                resolved.extend(g for g in guess if g not in resolved)
+            else:
+                unknown.append(token)
+
+        bac_before = float(getattr(self._s, "bac", 0.0) or 0.0)
+        glucose_before = float(self._s.glucose)
+        try:
+            result = self._engine.feed(
+                kind="drink", items=resolved or None, note=str(note or ""), portion=p
+            )
+        except Exception as exc:  # noqa: BLE001 - 跨插件接口不得把异常抛回去
+            return {"ok": False, "version": 1, "error": f"{type(exc).__name__}: {exc}"[:200]}
+
+        self._maybe_sample()
+        if rid:
+            self._drink_seen.append(rid)
+
+        return {
+            "ok": True,
+            "version": 1,
+            "request_id": rid,
+            "accepted": list(result.get("items") or []),
+            "unknown": unknown,
+            "portion": p,
+            "volume_ml": float(result.get("volume_ml") or 0.0),
+            "kcal": float(result.get("kcal") or 0.0),
+            "bac_before": round(bac_before, 4),
+            "bac_after": round(float(getattr(self._s, "bac", 0.0) or 0.0), 4),
+            "glucose_delta": round(float(self._s.glucose) - glucose_before, 2),
+            "fallback": bool(result.get("fallback")),
+        }
+
+    @API(name="get_clock", description="只读：世界钟与宿主墙钟的换算", version="1", public=True)
+    async def get_clock(self, **kwargs: Any) -> dict[str, Any]:
+        """只读时钟。两套字段名同时给：醉酒插件用 world_t/offset_h，厨房用 offset_seconds/sim_time。"""
+
+        del kwargs
+        s = self._s if self._engine else None
+        off_h = float(getattr(self._engine, "clock_offset", 0.0) or 0.0) if self._engine else 0.0
+        rate = float(getattr(self.config.sim, "speed", 1.0) or 1.0)
+        hour = float(getattr(s, "hour", 0.0) or 0.0) if s is not None else 0.0
+        hh = int(hour) % 24
+        mm = int(max(0.0, hour - int(hour)) * 60)
+        return {
+            "ok": True,
+            "version": 1,
+            "world_t": float(s.t) if s is not None else 0.0,
+            "wall_t": float(time.time()),
+            "offset_h": off_h,
+            "speed": rate,
+            # 厨房侧要的字段：同一份数据的另一种命名，只加不改
+            "offset_seconds": round(off_h * 3600.0, 1),
+            "sim_day": int(self._body_sim_day()) if self._engine else 1,
+            "sim_time": "%02d:%02d" % (hh, mm),
+            "rate": rate,
+        }
+
+    @API(name="get_state", description="只读：当前体征快照（供厨房等下游插件）", version="1", public=True)
+    async def get_state(self, **kwargs: Any) -> dict[str, Any]:
+        """只读体征。厨房做饭前后都用它判断「饿不饿 / 吃撑没有」。"""
+
+        del kwargs
+        if not self._ready or self._engine is None:
+            return {"ok": False, "version": 1, "error": "身体尚未就绪"}
+        s = self._s
+        hour = float(getattr(s, "hour", 0.0) or 0.0)
+        hh = int(hour) % 24
+        mm = int(max(0.0, hour - int(hour)) * 60)
+        return {
+            "ok": True,
+            "version": 1,
+            "sim_day": int(self._body_sim_day()),
+            "clock": "%02d:%02d" % (hh, mm),
+            "clock_offset_seconds": round(float(getattr(self._engine, "clock_offset", 0.0) or 0.0) * 3600.0, 1),
+            "world_t": float(s.t),
+            "hunger": round(float(s.hunger), 2),
+            "thirst": round(float(s.thirst), 2),
+            "energy": round(float(s.energy), 2),
+            "health": round(float(s.health), 2),
+            "glucose": round(float(s.glucose), 2),
+            "bac": round(float(getattr(s, "bac", 0.0) or 0.0), 4),
+            "gastric_volume_ml": round(float(s.gastric_volume), 1),
+            "last_meal_items": str(getattr(s, "last_meal_items", "") or ""),
+            "last_meal_ts": float(getattr(s, "last_meal_t", 0.0) or 0.0),
+            "drinks": int(getattr(s, "drinks", 0) or 0),
+            "sleeping": bool(s.sleeping),
+            "stress": round(float(getattr(s, "stress", 0.0) or 0.0), 2),
+            "depression": round(float(getattr(s, "depression", 0.0) or 0.0), 2),
+        }
+
+    @API(name="list_foods", description="只读：食物/饮品词表（含别名），供外部校验词能否解析", version="1", public=True)
+    async def list_foods(self, **kwargs: Any) -> dict[str, Any]:
+        """只读词表。同时给 items 与 foods 两套字段名，兼容两个下游插件。"""
+
+        del kwargs
+        items: list[dict[str, Any]] = []
+        foods: list[dict[str, Any]] = []
+        for item in (ALL_FOODS.values() if isinstance(ALL_FOODS, dict) else ALL_FOODS):
+            row = {
+                "key": item.key,
+                "label": item.label,
+                "group": item.group,
+                "volume_ml": _r(item.volume_ml, 1),
+                "kcal": _r(item.kcal, 1),
+                "alcohol_g": _r(item.alcohol_g, 1),
+                "selectable": bool(item.selectable),
+            }
+            items.append(row)
+            foods.append({**row, "default_portion": str(getattr(item, "portion", "") or "")})
+        aliases: dict[str, Any] = {}
+        try:
+            for entry in FOOD_ALIASES or []:
+                word, keys = entry[0], list(entry[1])
+                if not word or not keys:
+                    continue
+                aliases[str(word)] = keys[0] if len(keys) == 1 else keys
+        except Exception:  # noqa: BLE001 - 别名表异常不得影响主接口
+            aliases = {}
+        return {
+            "ok": True,
+            "version": 1,
+            "count": len(items),
+            "items": items,
+            "foods": foods,
+            "aliases": aliases,
+        }
+
+    @API(name="log_meal", description="写入：外部插件代麦麦记账（按克数、幂等、部分成功）", version="1", public=True)
+    async def log_meal(self, items: Any = None, kind: str = "meal", portion: float = 1.0,
+                       note: str = "", request_id: str = "", **kwargs: Any) -> dict[str, Any]:
+        """跨插件记账：厨房做好了、或她自己吃了，都走这里。
+
+        items 接受多种写法：
+          - [{"key": "Tomato", "amount_g": 180}, {"label": "牛肉", "amount_g": 90}]
+          - ["Tomato", "Rice"]
+          - "番茄,米饭"
+        amount_g 会按该食物 portion 字符串里的基准克数换算成比例；
+        换不出来时退回 volume_ml 近似并标 estimated=True。
+        """
+
+        del kwargs
+        empty = {"accepted": [], "rejected": [], "totals": {}, "delta": {}, "state": {}}
+        if not self._ready or self._engine is None:
+            return {"ok": False, "version": 1, "error": "身体尚未就绪", **empty}
+
+        rid = str(request_id or "").strip()
+        if rid and rid in self._meal_seen:
+            return {"ok": True, "version": 1, "duplicate": True, "request_id": rid, **empty}
+
+        try:
+            p_total = max(0.05, min(3.0, float(portion)))
+        except (TypeError, ValueError):
+            p_total = 1.0
+        feed_kind = str(kind or "meal").strip().lower()
+        if feed_kind not in {"meal", "snack", "drink"}:
+            feed_kind = "meal"
+
+        entries = self._parse_meal_items(items)
+        accepted: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        ratios: dict[str, float] = {}
+        for entry in entries:
+            token = str(entry.get("token") or "").strip()
+            amount = entry.get("amount_g")
+            key, label = self._resolve_food(token)
+            if not key:
+                rejected.append({"label": token, "reason": "unknown_food"})
+                continue
+            base = self._portion_base_grams(FOODS.get(key))
+            ratio = 1.0
+            estimated = amount is None
+            if amount is not None:
+                try:
+                    ratio = max(0.05, min(20.0, float(amount) / max(1.0, base)))
+                except (TypeError, ValueError):
+                    ratio = 1.0
+            ratio *= p_total
+            ratios[key] = ratios.get(key, 0.0) + ratio
+            accepted.append({
+                "key": key, "label": label,
+                "amount_g": amount,
+                "ratio": round(ratio, 3),
+                "estimated": estimated,
+            })
+
+        if not ratios:
+            return {"ok": False, "version": 1, "error": "没有可记账的食材", **empty, "rejected": rejected}
+
+        before_glucose = float(self._s.glucose)
+        before_bac = float(getattr(self._s, "bac", 0.0) or 0.0)
+        try:
+            self._engine.feed(kind=feed_kind, items=list(ratios.keys()),
+                              note=str(note or ""), portion=1.0, ratios=ratios)
+        except Exception as exc:  # noqa: BLE001 - 跨插件接口不得把异常抛回去
+            return {"ok": False, "version": 1,
+                    "error": f"{type(exc).__name__}: {exc}"[:200],
+                    "accepted": accepted, "rejected": rejected,
+                    "totals": {}, "delta": {}, "state": {}}
+
+        self._maybe_sample()
+        if rid:
+            self._meal_seen.append(rid)
+
+        tot = self._engine._combo_totals_ratio(list(ratios.keys()), ratios)
+        s = self._s
+        return {
+            "ok": True,
+            "version": 1,
+            "request_id": rid,
+            "kind": feed_kind,
+            "accepted": accepted,
+            "rejected": rejected,
+            "totals": {k: round(float(tot.get(k, 0.0) or 0.0), 2) for k in
+                       ("kcal", "volume_ml", "carb_g", "protein_g", "fat_g",
+                        "alcohol_g", "caffeine_mg", "water_ml", "na_mmol")},
+            "delta": {
+                "glucose_mmol": round(float(s.glucose) - before_glucose, 3),
+                "bac_g_l": round(float(getattr(s, "bac", 0.0) or 0.0) - before_bac, 4),
+            },
+            "state": {
+                "hunger": round(float(s.hunger), 1),
+                "thirst": round(float(s.thirst), 1),
+                "energy": round(float(s.energy), 1),
+                "health": round(float(s.health), 1),
+                "gastric_volume_ml": round(float(s.gastric_volume), 1),
+                "glucose": round(float(s.glucose), 2),
+            },
+        }
+
+    @API(name="adjust_mood", description="写入：小幅调整压力/心境（无 mood 字段，映射到 stress/depression）", version="1", public=True)
+    async def adjust_mood(self, stress_delta: float = 0.0, stress_add: float = 0.0,
+                          depression_delta: float = 0.0, depression_add: float = 0.0,
+                          mood_delta: float = 0.0, label: str = "", reason: str = "",
+                          **kwargs: Any) -> dict[str, Any]:
+        """两份请求的签名都收：厨房用 stress_delta/reason，醉酒用 stress_add/label。
+
+        身体没有 mood 字段，只有 stress（压力）与 depression（累积应激）。
+        mood_delta 按「心情好 = 压力降一半」保守映射，且每项夹在 ±20。
+        """
+
+        del kwargs
+        if not self._ready or self._engine is None:
+            return {"ok": False, "version": 1, "error": "身体尚未就绪"}
+
+        def _num(v: Any) -> float:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+
+        ds = _num(stress_delta) or _num(stress_add)
+        dd = _num(depression_delta) or _num(depression_add)
+        dm = _num(mood_delta)
+        if dm and not ds:
+            ds = -dm * 0.5
+        ds = max(-20.0, min(20.0, ds))
+        dd = max(-20.0, min(20.0, dd))
+
+        s = self._s
+        try:
+            before_stress = float(getattr(s, "stress", 0.0) or 0.0)
+            before_dep = float(getattr(s, "depression", 0.0) or 0.0)
+            s.stress = max(0.0, min(100.0, before_stress + ds))
+            s.depression = max(0.0, min(100.0, before_dep + dd))
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "version": 1, "error": f"{type(exc).__name__}: {exc}"[:200]}
+
+        return {
+            "ok": True,
+            "version": 1,
+            "stress": round(float(s.stress), 2),
+            "depression": round(float(s.depression), 2),
+            "applied": {
+                "stress_delta": round(ds, 2),
+                "depression_delta": round(dd, 2),
+                "mood_delta_mapped": round(dm, 2),
+            },
+            "label": str(label or reason or "")[:80],
+        }
+
+    @staticmethod
+    def _portion_base_grams(item: Any) -> float:
+        """从食物条目的 portion 字符串里抠出基准克数/毫升数。
+
+        「一碗 200 g 熟」→ 200；「250 mL 一杯」→ 250；「1 个」抠不出 → 退回 volume_ml。
+        """
+
+        try:
+            text = str(getattr(item, "portion", "") or "")
+        except Exception:  # noqa: BLE001
+            text = ""
+        m = re.search(r"(\d+(?:\.\d+)?)\s*(?:g|克|ml|mL|毫升)", text)
+        if m:
+            try:
+                return max(1.0, float(m.group(1)))
+            except (TypeError, ValueError):
+                pass
+        try:
+            return max(1.0, float(getattr(item, "volume_ml", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            return 100.0
+
+    @staticmethod
+    def _resolve_food(token: str) -> tuple[str, str]:
+        """把外部插件传来的词解析成食物 key；解析不出返回 ("", "")。"""
+
+        t = str(token or "").strip()
+        if not t:
+            return "", ""
+        if t in FOODS and getattr(FOODS[t], "selectable", True):
+            return t, str(getattr(FOODS[t], "label", t))
+        guess = parse_menu(t, limit=1)
+        if guess:
+            key = guess[0]
+            return key, str(getattr(FOODS.get(key), "label", key))
+        return "", ""
+
+    def _parse_meal_items(self, items: Any) -> list[dict[str, Any]]:
+        """把 items 归一成 [{"token": str, "amount_g": float|None}]。"""
+
+        out: list[dict[str, Any]] = []
+        raw = items
+        if isinstance(raw, str):
+            raw = [x for x in raw.replace("，", ",").split(",")]
+        elif isinstance(raw, dict):
+            raw = [raw]
+        if not isinstance(raw, (list, tuple)):
+            return out
+        for entry in raw:
+            if isinstance(entry, dict):
+                token = str(entry.get("key") or entry.get("label") or entry.get("name") or "").strip()
+                amount = entry.get("amount_g", entry.get("grams", entry.get("g")))
+                try:
+                    amount = float(amount) if amount is not None else None
+                except (TypeError, ValueError):
+                    amount = None
+                out.append({"token": token, "amount_g": amount})
+            else:
+                out.append({"token": str(entry or "").strip(), "amount_g": None})
+        return out
+
     # ===== 给 LLM 的工具 =====
 
     # ===== 联动：身体状态注入对话 =====
@@ -1683,13 +2108,18 @@ class LifeBodyPlugin(MaiBotPlugin):
 
     @Tool(
         "body_eat",
-        description="让麦麦真的吃下或喝下一份东西（用户点了外卖、买了奶茶时用）",
-        brief_description="给麦麦喂东西",
+        description=("记录一次刚刚发生的吃喝：用户给她点/买/递，"
+                     "或叫她吃、叫她喝时，记一笔"),
+        brief_description="记录新的吃喝",
         detailed_description=(
             "把一次真实发生的吃喝落进身体模型：血糖、胃排空、水分都会真的变化。"
-            "只在用户明确表示要给她吃东西、或她自己答应要吃时调用，不要凭聊天内容自行推测。"
+            "只在「吃喝刚刚发生」时调用：用户给她点/买/递，或叫她吃、叫她喝"
+            "（「给你点了外卖」「陪我喝半杯白酒」）。"
+            "被问「你吃了什么」「喝水了吗」这类事后询问，只是把已有记录陈述出来，"
+            "不要再调本工具——身体里的那件事要么来自日程自主进食，要么来自刚才那次投喂，"
+            "已经记过了，再记一次就是凭空多出一份。"
             "kind 用 meal（一顿饭）/ snack（零食）/ drink（喝的）；"
-            "items 可以填具体食物名，留空则按当前餐段随机配一份。"
+            "items 写具体食物名；drink 留空只会按白水记，想记准就写明是什么。"
         ),
         parameters=[
             ToolParameterInfo(name="kind", param_type=ToolParamType.STRING,
@@ -1788,6 +2218,16 @@ class LifeBodyPlugin(MaiBotPlugin):
         # 回话给模型看的是中文菜名，不是内部 key（旧实现回 "Rice、Pork、Soup"，
         # 模型转述给用户时会显得像在对代码说话）。
         eaten = combo_summary(result.get("items") or []) or "、".join(result.get("items") or [])
+        # drink 没点名具体饮品时引擎按白水记（不再随机抽），这里必须如实说
+        # "记的是水"，否则模型会以为记上了自己说的那杯，身体与事实又脱节。
+        if result.get("fallback"):
+            return {
+                "name": "body_eat",
+                "content": (
+                    f"记下了：{eaten}（你没说具体是哪种饮品，先按白水记）。"
+                    f"想记准就再调一次并写明 items，例如「白酒」「可乐」。"
+                ),
+            }
         return {
             "name": "body_eat",
             "content": (

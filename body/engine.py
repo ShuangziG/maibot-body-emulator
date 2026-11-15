@@ -1101,7 +1101,8 @@ class BodyEngine:
             return "lunch"
         return "dinner"
 
-    def feed(self, kind: str = "snack", items: list = None, note: str = "") -> dict:
+    def feed(self, kind: str = "snack", items: list = None, note: str = "",
+             portion: float = 1.0, ratios: dict = None) -> dict:
         """外部喂食：把一次真实发生的吃喝灌进身体。
 
         与 _eat 的区别：_eat 从固定食谱池里随机挑，feed 接受指定食物，
@@ -1114,20 +1115,33 @@ class BodyEngine:
             return {"ok": False, "reason": "住院中，由医护供能"}
 
         if kind == "drink":
-            keys = list(items) if items else food.pick_drink(self.rng)
+            # 2026-11-15：留空不再随机配饮品。旧实现走 food.pick_drink() 从
+            # DRINK_POOL 里抽，模型报「我喝了半杯白酒」而解析不出具体饮品时，
+            # 会落成随机果汁 —— 说了喝、身体没喝到点子上，比不记还误导。
+            # 现在认不出就按白水记（零热量、零酒精、零咖啡因），并把
+            # fallback 标记回传给上层，由它提示模型补具体饮品。
+            fallback = not items
+            keys = list(items) if items else [food.DEFAULT_DRINK_KEY]
             s.last_drink_t = s.t
             s.drinks += 1
-            tot = food.combo_totals(keys)
+            tot = self._scale_tot(food.combo_totals(keys), portion)
             self._load_stomach(keys, tot, water_already=True)
-            self.bus.emit(Event(s.t, "drink", "info", "喝水",
-                                {"items": keys, "note": note}))
-            return {"ok": True, "kind": "drink", "items": keys}
+            name = food.combo_summary(keys)
+            # 旧实现只加 drinks 计数，从不写 last_drink_items —— 记了账界面上
+            # 也看不到「最近一次喝了什么」，issue #3 正是拿这个字段判"没记"。
+            s.last_drink_items = name
+            self.bus.emit(Event(s.t, "drink", "info", f"饮水：{name}",
+                                {"items": keys, "note": note, "fallback": fallback}))
+            return {"ok": True, "kind": "drink", "items": keys, "fallback": fallback,
+                    "portion": float(portion),
+                    "volume_ml": round(float(tot.get("volume_ml") or 0.0), 1),
+                    "kcal": round(float(tot.get("kcal") or 0.0), 1)}
 
         slot = "snack" if kind == "snack" else self._meal_slot(s.hour)
         keys = list(items) if items else (
             food.pick_snack(self.rng) if slot == "snack" else food.pick_meal(slot, self.rng)
         )
-        actual = self._eat_keys(slot, keys, note=note)
+        actual = self._eat_keys(slot, keys, note=note, ratios=ratios)
         return {"ok": True, "kind": slot, "items": list(actual or keys)}
 
     def _drink(self):
@@ -1150,6 +1164,43 @@ class BodyEngine:
         self.bus.emit(Event(s.t, "drink", "info", f"喝水：{name}",
                             {"item": name, "water": round(s.body_water, 2)}))
 
+    @staticmethod
+    def _combo_totals_ratio(keys: list, ratios: dict) -> dict:
+        """逐条按比例累加成分总量，供「不同的菜各多少克」这种混合记账。
+
+        先对每个 key 单独求和再乘比例，最后累加 —— 不能先求和再统一乘，
+        否则「180 g 番茄 + 50 g 面」会被拉成同一个比例。
+        """
+
+        total: dict = {}
+        for key in keys:
+            one = food.combo_totals([key])
+            r = 1.0
+            try:
+                r = max(0.0, min(20.0, float(ratios.get(key, 1.0))))
+            except (TypeError, ValueError):
+                r = 1.0
+            for name, value in one.items():
+                if isinstance(value, (int, float)):
+                    total[name] = total.get(name, 0.0) + float(value) * r
+        return total
+
+    @staticmethod
+    def _scale_tot(tot: dict, portion: float) -> dict:
+        """按份量比例缩放一次吃喝的成分总量（portion=0.5 即半份）。
+
+        2026-11-15：给跨插件 API log_drink 用 —— 「她自己喝了半杯」不该按整杯
+        记进血液。夹紧在 0.05~3.0，异常值一律按整份，不影响既有调用。
+        """
+
+        try:
+            p = float(portion)
+        except (TypeError, ValueError):
+            return tot
+        if not (0.05 <= p <= 3.0) or abs(p - 1.0) < 1e-6:
+            return tot
+        return {k: (float(v) * p if isinstance(v, (int, float)) else v) for k, v in tot.items()}
+
     def _load_stomach(self, keys, tot, water_already=False):
         """把一组食物按成分灌进胃里（对应 APK 的 AddContent / GastricVolume）。"""
         s = self.s
@@ -1171,7 +1222,7 @@ class BodyEngine:
             keys = food.pick_meal(slot, self.rng)
         self._eat_keys(slot, keys)
 
-    def _eat_keys(self, slot, keys, note=""):
+    def _eat_keys(self, slot, keys, note="", ratios: dict = None):
         """按指定食物组合进餐：胃内容物 -> 逐项成分 -> 排空吸收。
 
         2026-11-06 改造：原实现是 glucose += 2.2 / na_mass += 40 的常量注入，
@@ -1182,10 +1233,12 @@ class BodyEngine:
         # 正餐补到七分饱：日程/工具点名了具体食物时，那几句话往往只描述了
         # 一道主菜（"点了碗米粉"），按原样落地胃内容物只有两三百毫升。
         # 这里对所有正餐统一补足到 MEAL_TARGET_ML；零食（snack）不补。
-        if slot in ("breakfast", "lunch", "dinner"):
+        # 按克数记账（ratios 非空）时不补足：厨房报的是实际重量，
+        # 再补到七分饱会让「半碗」凭空变大。
+        if ratios is None and slot in ("breakfast", "lunch", "dinner"):
             keys = food.ensure_meal_size(keys)
         keys = list(keys)
-        tot = food.combo_totals(keys)
+        tot = self._combo_totals_ratio(keys, ratios) if ratios else food.combo_totals(keys)
         self._load_stomach(keys, tot)
 
         s.last_meal_t = s.t

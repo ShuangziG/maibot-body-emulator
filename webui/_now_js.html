@@ -62,6 +62,7 @@
     if (!box) return;
     var l = d.link || {};
     box.className = 'lb-linkbar';
+    var linkName = (l.provider === 'weave') ? '麦织' : '麦生活';
     var dot = $('link-dot');
     var text = $('link-text');
     var meta = $('link-meta');
@@ -72,8 +73,8 @@
     }
     if (!l.ok) {
       box.className = 'lb-linkbar err';
-      text.textContent = '联动已开启，但取不到麦生活状态';
-      meta.textContent = (l.last_error || '麦生活可能没在运行').slice(0, 48);
+      text.textContent = '联动已开启，但取不到' + linkName + '状态';
+      meta.textContent = (l.last_error || linkName + '可能没在运行').slice(0, 48);
       return;
     }
     box.className = 'lb-linkbar on';
@@ -87,7 +88,7 @@
     if (l.inject_state) bits.push('状态注入');
     if (l.share_state) bits.push('主动分享');
     if (l.feeding) bits.push('可喂食');
-    text.textContent = '已联动麦生活 · ' + (l.summary || l.phase || '状态同步中');
+    text.textContent = '已联动' + linkName + ' · ' + (l.summary || l.phase || '状态同步中');
     meta.textContent = bits.join('　');
   }
 
