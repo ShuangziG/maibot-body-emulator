@@ -57,6 +57,12 @@ _tau("adh", 300.0)
 _tau("temp", 300.0)
 _tau("affect", 900.0)
 
+# 糖原储存容量上限（g）。2026-11-16 由 500 提到 800：
+#   文献：骨骼肌糖原约 400~900 g（随训练与饮食大幅波动）+ 肝糖原 100~120 g，
+#   合计在糖负荷后可远超 500 g。旧上限 500 在连续高碳水饮食下会顶格，
+#   储存通道关闭后血糖失去主要去路 —— 实测两顿米饭就能冲到 15.8。
+GLYCOGEN_MAX = 800.0
+
 
 class BodyEngine:
     """一具独立运行的赛博身体。"""
@@ -1856,8 +1862,13 @@ class BodyEngine:
         incretin = (0.55 * max(0.0, min(s.gip, 1.6) - 0.10)
                     + 0.35 * max(0.0, min(s.glp1, 1.6) - 0.10))
         amino_drive = 0.12 * clamp(s.gut_amino / 20.0, 0.0, 1.0)
+        # 2026-11-16 改：上限 1.60 -> 2.20。
+        # 旧上限使胰岛素在血糖约 11 mmol/L 时即饱和，此后处置能力不再随血糖
+        # 上升 —— 实测两顿米饭叠加时血糖一路冲到 14.9 且仍在爬。
+        # 文献：健康人餐后胰岛素可达空腹的 5~10 倍（空腹按本模型 0.30 计，
+        # 对应上限 1.5~3.0）。取 2.20（约 7 倍空腹）落在区间内。
         s.insulin = clamp(0.30 + 0.50 * (s.glucose - 5.0) / 5.0
-                          + incretin + amino_drive, 0.10, 1.60)
+                          + incretin + amino_drive, 0.10, 2.20)
 
         # 葡萄糖动力学：显式单位（mmol/min ÷ 分布容积 L），不用混合量纲系数。
         # 旧版 dg*dt/4.0 是量纲糊在一起的产物，实测 14.0 -> 9.5 只用 5.1 分钟，
@@ -1931,21 +1942,46 @@ class BodyEngine:
             tissue_mmol_min *= 1.8
         net_mmol_min = hepatic_mmol_min - tissue_mmol_min
         s.glucose = clamp(s.glucose + net_mmol_min / GLUCOSE_V * (dt / 60.0), 2.0, 25.0)
+
+        # ---- 肾糖阈：血糖超过约 10 mmol/L 时经尿排糖（2026-11-16 补）----
+        # 真实人体肾糖阈约 10 mmol/L（180 mg/dL）；超过后滤过的葡萄糖超出
+        # 肾小管最大重吸收能力，多余部分随尿排出，是糖尿病/高血糖时的一条
+        # 重要去路。旧实现只把它算进尿量（glu_urine_day_ml）用于渗透利尿，
+        # **没有从血糖里扣除** —— 高血糖因此完全没有上限约束。
+        # 系数 0.20 mmol/min per mmol/L 超出量：血糖 15.9 时约 1.2 mmol/min，
+        # 与肾血浆流量约 7.5 L/h、最大重吸收约 2.08 mmol/min 的量级相符。
+        # 该通路在 10 mmol/L 以下恒为 0，正常血糖段不受影响。
+        renal_glu_mmol_min = max(0.0, s.glucose - 10.0) * 0.20
+        if renal_glu_mmol_min > 0.0:
+            s.glucose = clamp(s.glucose - renal_glu_mmol_min / GLUCOSE_V * (dt / 60.0),
+                              2.0, 25.0)
         # 糖原账本（单位：g）。GLUCOSE_G_PER_MMOL = 180 mg = 0.18 g，
         # 旧实现漏了这个换算，把 mmol/min 直接当 g/min 扣，糖原消耗快 5.6 倍
         # （实测 400 g 在 10 h 内耗尽，真实需 24-48 h）。
         GLUCOSE_G_PER_MMOL = 0.18
         s.glycogen = clamp(s.glycogen
                            - hepatic_mmol_min * GLUCOSE_G_PER_MMOL * (dt / 60.0),
-                           0.0, 500.0)
-        # 回补糖原的驱动量是「血糖高出设定点的部分」，与 net 正负无关 ——
-        # 餐后血糖上升靠的是肠吸收（不在 net 里），旧实现的 net>0 门几乎
-        # 永不成立，于是吃什么都不补糖原。
-        if s.glucose > 5.0:
-            store = max(0.0, s.glucose - 5.0) * s.insulin * 3.0
-            s.glycogen = clamp(s.glycogen
-                               + store * GLUCOSE_G_PER_MMOL * (dt / 60.0),
-                               0.0, 500.0)
+                           0.0, GLYCOGEN_MAX)
+        # ---- 糖原储存：必须是血糖的真实去路（2026-11-16 修）----
+        # 旧实现只在糖原账本上加，**从不从血糖扣除** —— 质量不守恒：
+        # 糖原以约 224 g/h 冲到 500 上限，血糖却一点没降。两处后果叠加
+        # （胰岛素饱和 + 糖原顶格），血糖失去全部去路，实测冲到 14.9。
+        #
+        # 文献依据（见 REFERENCES.md [R16]）：
+        #   肝糖原约 100~120 g、肌糖原约 400 g，合计上限约 500 g —— 保留下限 500。
+        #   餐后约 30% 葡萄糖由肝脏处置、15~20% 进入肌糖原；糖原合成是
+        #   餐后葡萄糖处置的主要去路之一，不能只记账不扣糖。
+        #
+        # 速率上限取 2.6 mmol/min：高胰岛素钳夹实测全body最大处置约
+        # 10~12 mg/kg/min（70 kg ≈ 3.9~4.7 mmol/min），其中外周摄取已由
+        # tissue_mmol_min 承担，储存份额再取 2.6 会使总处置接近生理上限。
+        # 趋近 500 g 上限时用 room 线性收敛，避免瞬间顶格。
+        if s.glucose > 5.0 and s.glycogen < GLYCOGEN_MAX:
+            room = clamp((GLYCOGEN_MAX - s.glycogen) / 60.0, 0.0, 1.0)
+            store_mmol_min = min(2.6, max(0.0, s.glucose - 5.0) * s.insulin * 0.40) * room
+            d_store = store_mmol_min * (dt / 60.0)      # mmol（本步）
+            s.glucose = clamp(s.glucose - d_store / GLUCOSE_V, 2.0, 25.0)
+            s.glycogen = clamp(s.glycogen + d_store * GLUCOSE_G_PER_MMOL, 0.0, GLYCOGEN_MAX)
 
         # ---- 乳酸：产生快、清除慢的双相模型（2026-11-14 重写）----
         # 旧实现用单一 approach_tau(..., 180s) 逼近一个离散目标值：
@@ -2179,7 +2215,7 @@ class BodyEngine:
             s.duodenum_fat -= duo_fat
             # 十二指肠只吸收少量：碳水 15%、蛋白 10%、脂肪 5%
             s.gut_glucose += duo_carb * 0.15 * 1000.0 / 180.0 * self.CARB_TO_BLOOD
-            s.glycogen = min(500.0, s.glycogen + duo_carb * 0.15 * (1.0 - self.CARB_TO_BLOOD) * 0.8)
+            s.glycogen = min(GLYCOGEN_MAX, s.glycogen + duo_carb * 0.15 * (1.0 - self.CARB_TO_BLOOD) * 0.8)
             s.gut_amino += duo_prot * 0.10
             s.fat_reserve = min(400.0, s.fat_reserve + duo_fat * 0.05)
             # 剩余进空肠
@@ -2236,7 +2272,7 @@ class BodyEngine:
             s.gut_glucose += _absorbed_mmol * _fast_r
             s.gut_glucose_slow = (float(getattr(s, "gut_glucose_slow", 0.0) or 0.0)
                                   + _absorbed_mmol * (1.0 - _fast_r))
-            s.glycogen = min(500.0, s.glycogen + j_carb * 0.92 * (1.0 - _ctb) * 0.8)
+            s.glycogen = min(GLYCOGEN_MAX, s.glycogen + j_carb * 0.92 * (1.0 - _ctb) * 0.8)
             s.gut_amino += j_prot * 0.78
             s.fat_reserve = min(400.0, s.fat_reserve + j_fat * 0.55)
             # 未吸收部分入回肠
@@ -2305,7 +2341,7 @@ class BodyEngine:
             k_aa = math.log(2.0) / (60.0 * 60.0)
             aa_out = s.gut_amino * (1.0 - math.exp(-k_aa * dt))
             s.gut_amino -= aa_out
-            s.glycogen = min(500.0, s.glycogen + aa_out * 0.35)
+            s.glycogen = min(GLYCOGEN_MAX, s.glycogen + aa_out * 0.35)
 
         # ---- 不可消化残渣入结肠 ----
         s.colon_residue = min(400.0, s.colon_residue

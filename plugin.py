@@ -46,7 +46,7 @@ from .body.translate import FEELING_LEVELS, drunk_level, eat_phase, phase
 from .config import LifeBodyConfig
 from .link import LifeLink
 
-PLUGIN_VERSION = "1.2.2"
+PLUGIN_VERSION = "1.2.3"
 H2S = 3600.0
 SAVE_FILE = "body_state.json"
 
