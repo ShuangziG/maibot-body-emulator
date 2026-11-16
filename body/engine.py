@@ -239,6 +239,30 @@ class BodyEngine:
     # 这是健康成人睡眠结构的普遍规律（PSG 实测）。
     SLEEP_CYCLE_MIN = 90.0
 
+    # ---- 连续睡眠区间（sleep bout）口径 ----
+    # 2026-11-16 新增。只有连续睡眠达到 min_sleep_bout_hours（默认 4 小时）
+    # 才被记为「一夜合格睡眠」，计入睡眠债结算与近 7 日质量统计。
+    #
+    # 【诚实标注】这个 4 小时门槛是**工程取舍，不是文献结论**。
+    # 文献检索确认：目前没有「连续 4 小时不间断睡眠」这一健康阈值的
+    # 权威出处（见 docs/血糖与睡眠文献依据.md 未核实清单第 3 条）。
+    # 它的作用是——把午睡/打盹挡在「昨晚睡了多久」的统计之外，
+    # 避免一次 25 分钟的小睡被记成一夜睡眠。取 4 小时是因为它明显低于
+    # 成人最低正常夜间睡眠、又明显高于任何午睡时长，能稳定区分两者。
+    # 需要不同口径时改这个数即可；设为 0 则关闭门槛。
+    #
+    # 为什么按「连续」而不是「累计」：睡眠碎片化（fragmentation）本身
+    # 独立于总时长地损害恢复效果。但注意本模型的「连续」是带容忍间隙的
+    # （见 sleep_bout_gap_tolerance_hours）—— 夜里短暂醒来不会把一夜切断，
+    # 否则一个 6 小时 + 1 小时的夜晚会被错误地拆成 6h 和「不够 4h 的午睡」。
+    # 设为 0 可关闭门槛（任何长度的 bout 都计入）。
+    min_sleep_bout_hours: float = 4.0
+    # 判定「两段睡眠是否连续」的容忍间隙：中途醒来不足这么久视为同一 bout
+    # 里的一次短暂觉醒（会记入 wake，但不把 bout 切断）。
+    sleep_bout_gap_tolerance_hours: float = 0.5
+    # 近 7 日统计窗口
+    sleep_week_window_days: float = 7.0
+
     # 周期内各阶段的相对占比（浅睡 / 深睡 / REM）。周期序号越大，深睡越少、
     # REM 越多 —— 用两组系数在 cycle_profile() 里按周期线性插值。
     _CYCLE_PROFILE_EARLY = (0.55, 0.35, 0.10)   # 第一个周期：浅/深/REM
@@ -269,6 +293,11 @@ class BodyEngine:
         """
         s = self.s
         in_window = self._in_sleep_window(s.hour)
+
+        # ---- 延迟结算当前 bout（2026-11-16）----
+        # 清醒超过容忍间隙 → 这一段连续睡眠真的结束了，结算并结算质量。
+        # 间隙之内 → 视为同一次睡眠的短暂觉醒，继续挂账等着睡回去。
+        self._flush_sleep_bout()
 
         # ---- 连续清醒计时 ----
         # 醒着就累加，睡着就归零。用于判断是否该强制入睡。
@@ -357,6 +386,7 @@ class BodyEngine:
                 s.sleep_stage = "awake"
                 s.sleep_depth = approach_tau(s.sleep_depth, 0.0, dt, 60.0)
                 s.dur_awake += dt
+                s.sleep_bout_awake_sec = float(getattr(s, "sleep_bout_awake_sec", 0.0)) + dt
                 return
 
         # ---- 入睡 / 醒来：带一段过渡（不抖动）----
@@ -376,13 +406,57 @@ class BodyEngine:
                 s.stage_elapsed = 0.0
                 s.cycle_pos = 0.0
                 s.sleep_stage = "light"
-                if not resumed:
-                    # 全新的一个夜晚：清零累计
+                # 2026-11-16 修：旧实现在「重新入睡」（resumed=True）时不清零
+                # dur_*，于是「睡 6 小时 → 醒 3 分钟 → 再睡」会接着同一份账本
+                # 继续累加；跨夜的账本也从不归零，实测三晚 8 小时累计成 23.9 h，
+                # 而 WebUI 上「睡了一整夜」却显示总时长接近 0。
+                #
+                # 新口径：账本按「连续睡眠区间（bout）」记账，而不是按「入睡事件」。
+                #   距上一段 bout 结束 < sleep_bout_gap_tolerance_hours（默认 0.5h）
+                #   → 视为同一次睡眠中的短暂觉醒，账本延续、只累计清醒时长；
+                #   否则 → 新的一段 bout，账本清零重记。
+                prev_end = float(getattr(s, "sleep_bout_end_t", 0.0) or 0.0)
+                tol = float(self.sleep_bout_gap_tolerance_hours) * H2S
+                same_bout = (s.sleep_bout_start_t > 0.0 and prev_end > 0.0
+                             and (s.t - prev_end) <= tol)
+                if same_bout:
+                    # 同一 bout 内的短暂觉醒后重新入睡：只累计清醒，不清账
+                    s.sleep_bout_wakes = int(getattr(s, "sleep_bout_wakes", 0)) + 1
+                else:
                     s.dur_light = s.dur_deep = s.dur_rem = s.dur_awake = 0.0
                     s.wake_count = 0
                     s.wake_by_message = s.wake_by_thirst = s.wake_by_bladder = 0
+                    s.sleep_bout_start_t = s.t
+                    s.sleep_bout_wakes = 0
+                    s.sleep_bout_light_sec = 0.0
+                    s.sleep_bout_deep_sec = 0.0
+                    s.sleep_bout_rem_sec = 0.0
+                    s.sleep_bout_awake_sec = 0.0
+                    s.sleep_bout_stage_sec = 0.0
+                if not resumed:
                     s.sleep_onset_t = s.t
-                s.last_sleep_t = s.last_sleep_t or s.t
+                # 2026-11-16 修真实 bug：原文是 s.last_sleep_t = s.last_sleep_t or s.t，
+                # `or` 短路导致它只在第一次赋值时生效，之后永远是旧值 ——
+                # 服务器存档实测该字段停在「第一次入睡」的时刻，比当时晚了
+                # 38.7 小时。字段注释写的是「上次入睡的仿真时刻」，语义不符。
+                # 现改为每次真正入睡都更新。
+                s.last_sleep_t = s.t
+                # 记下「夜间时段」，供结算时判定午睡 vs 夜间片段。
+                # 结算常发生在窗口开关已关闭之后，不能依赖当时的开关状态。
+                #
+                # 2026-11-16 修：不能无条件记录当次入睡的窗口 —— 午睡时
+                # sleep_start/end 会被设成 13:00–13:30，照记的话午睡窗口
+                # 自己就成了"夜间窗口"，13:07 落在里面被当成夜间睡眠
+                # （实测回归：午睡被计入夜数）。只有当这个窗口确实跨越
+                # 深夜（覆盖 0 点附近，或时长 >= 4h）时才认定为夜间窗口。
+                _a = float(self.sleep_start_hour)
+                _b = float(self.sleep_end_hour)
+                _span = (_b - _a) % 24.0
+                if _span <= 0.0:
+                    _span = 24.0
+                _crosses_midnight = (_a > _b) or (_a <= 4.0) or (_b >= 24.0)
+                if (_span >= 4.0) and _crosses_midnight:
+                    self.sleep_night_window = (_a, _b)
                 self.bus.emit(Event(s.t, "sleep_start", "info",
                                     "重新入睡" if resumed else "睡着",
                                     {"stage": "light"}))
@@ -392,7 +466,14 @@ class BodyEngine:
             if s.sleep_depth <= 0.5:
                 s.sleeping = False
                 s.sleep_stage = "awake"
-                self._settle_sleep()
+                # 2026-11-16：醒来不再立即结算，只标记 bout 的「最后清醒时刻」。
+                # 原因：夜里短暂觉醒（被消息吵醒、起夜）如果立刻结算，会把
+                # 一个完整夜晚切成 6h + 1h 两段，后一段因不足 4h 被当成午睡
+                # 丢弃 —— 用户看到的正是「睡了 6 小时只算了半小时」。
+                # 改为延迟结算：清醒超过 sleep_bout_gap_tolerance_hours
+                # 才认定这一段 bout 真的结束了（见 _flush_sleep_bout）。
+                if float(getattr(s, "sleep_bout_start_t", 0.0)) > 0.0:
+                    s.sleep_bout_end_t = s.t
                 s.sleep_onset_t = 0.0
         else:
             # 保持当前状态，按阶段推进深度
@@ -412,9 +493,18 @@ class BodyEngine:
         #   每个 24 小时周期结束时结算：缺口 = max(0, 基准 - 实际睡)
         # 这样无论几点睡、睡多久，只要总量不够就会持续欠债。
         #
-        # 同时保留「窗口内清醒」的即时累积，用于捕捉「该睡不睡」的短期债。
-        if not s.sleeping and in_window:
-            s.sleep_debt = clamp(s.sleep_debt + dt / H2S, 0.0, 48.0)
+        # 2026-11-16 修：删除「窗口内清醒」的即时累积。
+        # 服务器存档实测暴露了它的后果 —— 8 天里实际睡了 62.77 h，
+        # 对 8 晚 × 7.5 h = 60 h 的需求几乎不缺，但 sleep_debt 报到 13.12。
+        # 原因是同一段清醒时间被**重复计债三次**：
+        #   ① 这里（窗口内清醒，按秒累加）
+        #   ② 上面的 awake_hours > 16 h（按秒累加）
+        #   ③ _settle_sleep 里按「每晚缺口」结算
+        # 三条通路口径不同却同时生效，债自然越滚越大，且与「到底睡够没有」
+        # 脱钩。现统一到单一账本：**只由 _settle_sleep 在每段合格 bout
+        # 结束时按缺口结算**，清醒期不再单独加债。
+        # awake_hours > 16 h 那条保留，因为它捕捉的是「一直不睡」这种
+        # 极端情形 —— 那种情况下根本不会有 bout 结束，没有它债就是 0。
 
     # ------------------------------------------------------------------
     # 日程驱动的运动（2026-11-14）
@@ -836,13 +926,17 @@ class BodyEngine:
         else:
             new_stage = "rem"
 
-        # 累计时长
+        # 累计时长（整夜账本 + 当前 bout 账本，2026-11-16 起两者分开记）
         if new_stage == "light":
             s.dur_light += dt
+            s.sleep_bout_light_sec = float(getattr(s, "sleep_bout_light_sec", 0.0)) + dt
         elif new_stage == "deep":
             s.dur_deep += dt
+            s.sleep_bout_deep_sec = float(getattr(s, "sleep_bout_deep_sec", 0.0)) + dt
         else:
             s.dur_rem += dt
+            s.sleep_bout_rem_sec = float(getattr(s, "sleep_bout_rem_sec", 0.0)) + dt
+        s.sleep_bout_stage_sec = (float(getattr(s, "sleep_bout_stage_sec", 0.0)) + dt)
 
         if new_stage != s.sleep_stage:
             self.bus.emit(Event(s.t, "sleep_stage", "debug", "睡眠分期",
@@ -861,74 +955,249 @@ class BodyEngine:
             s.stage_elapsed = 0.0
             s.cycle_pos = 0.0
 
-    def _settle_sleep(self):
-        """醒来结算：算睡眠质量，按质量还睡眠债。"""
+    def _flush_sleep_bout(self):
+        """检查当前 bout 是否已经真正结束，是则结算。
+
+        判定条件：不在睡眠中，且距离 bout 内最后一次由睡转醒已经超过了
+        sleep_bout_gap_tolerance_hours（默认 0.5 小时）。
+        这样做的好处：短暂的夜间觉醒（被叫醒、起夜）不会把一个整夜
+        切成两段，而真正起床后又会被及时结算，不会出现「睡完了才发现
+        总时长还是 0」。
+        """
         s = self.s
-        total = s.dur_light + s.dur_deep + s.dur_rem
-        if total <= 0.0:
+        if s.sleeping:
+            return
+        if float(getattr(s, "sleep_bout_start_t", 0.0)) <= 0.0:
+            return
+        last = float(getattr(s, "sleep_bout_end_t", 0.0) or 0.0)
+        if last <= 0.0:
+            return
+        tol = float(getattr(self, "sleep_bout_gap_tolerance_hours", 0.5)) * H2S
+        if (s.t - last) < tol:
+            return
+        self._settle_sleep()
+
+    def _settle_sleep(self):
+        """醒来结算：按「连续睡眠区间（bout）」算质量、还睡眠债。
+
+        2026-11-16 重写。旧实现直接拿 dur_light/dur_deep/dur_rem 的整体累计
+        当作「这一觉」的时长，由此产生三个互相叠加的错误：
+
+          1. dur_* 只在首次入睡时清零，跨夜不归零 —— 实测连续三晚 8 小时
+             后 total_h 变成 23.93（三晚串成一觉）。
+          2. 「重新入睡」分支（resumed=True）同样不清零，中途醒一次再睡
+             会接着同一份账本继续加。
+          3. 只有「醒来」才结算，而正常作息下她睡到窗口末尾才醒；于是
+             WebUI 在整个夜里拿到的都是上一次（或初始的 0）质量值 ——
+             用户看到「睡了 6 小时只算了半小时」，根因在这里。
+
+        新口径：
+          - 时长只认「连续睡眠区间」，bout 内被唤醒的清醒时间不计入睡眠
+            时长，但计入睡眠效率（PSG 的 sleep efficiency 定义）。
+          - 短于 min_sleep_bout_hours（默认 4h）的 bout —— 午睡、打盹 ——
+            不记为合格一夜：不参与睡眠债结算、不进入近 7 日质量统计，
+            只发一个 nap_end 事件。这与「午睡不该影响夜间睡眠质量」一致。
+          - 合格的 bout 追加进 sleep_bouts，并重算近 7 日汇总（PSQI 口径）。
+        """
+        s = self.s
+        light_s = float(getattr(s, "sleep_bout_light_sec", 0.0) or 0.0)
+        deep_s = float(getattr(s, "sleep_bout_deep_sec", 0.0) or 0.0)
+        rem_s = float(getattr(s, "sleep_bout_rem_sec", 0.0) or 0.0)
+        awake_s = float(getattr(s, "sleep_bout_awake_sec", 0.0) or 0.0)
+
+        slept_s = light_s + deep_s + rem_s
+        if slept_s <= 0.0:
             return
 
-        total_h = total / H2S
-        s.last_sleep_hours = total_h   # 供运动门槛判断"昨晚睡够没有"
-        deep_r = s.dur_deep / total
-        rem_r = s.dur_rem / total
-        awake_h = s.dur_awake / H2S
+        # bout 总时长 = 实际睡着 + 中途清醒（在床时间，time in bed）
+        bout_s = slept_s + awake_s
+        total_h = slept_s / H2S
+        bout_h = bout_s / H2S
+        efficiency = (slept_s / bout_s) if bout_s > 0.0 else 0.0
 
-        # 质量评分（0~100）：
-        #   时长分（满分 40）—— 7~9 h 最佳，少于 6 h 明显扣分
-        #   深睡分（满分 30）—— 健康区间 20~25%，偏离线性扣分
-        #   REM 分（满分 20）—— 健康区间 20~25%
-        #   连续性（满分 10）—— 中途清醒越少越高
+        s.sleep_bout_end_t = s.t
+
+        min_bout = float(getattr(self, "min_sleep_bout_hours", 4.0) or 0.0)
+
+        # ---- 午睡 vs 夜间碎片：按「时段」区分，不只看时长 ----
+        # 2026-11-16 修：旧逻辑用「总时长 < 门槛」一刀切丢弃，结果是
+        # 「23:00 睡到 02:00（3h）→ 因故醒 1h → 再睡到 07:00」这种被
+        # 打断的夜晚，前半段 3h 因不足 4h 被整体丢掉，后半段又从零起算，
+        # 最后整夜什么都没记住（实测 bouts=0、last_sleep_hours=0）。
+        # 正确口径：
+        #   · 落在**夜间睡眠窗口**（或紧邻窗口）的片段 —— 即使被中途醒来
+        #     打断、单段不足 4h —— 仍属于这一夜，应当累计并计入统计；
+        #   · 落在**日间**的短睡才是午睡，按门槛过滤。
+        # 判据用 bout 起点所在的钟点是否在该夜的睡眠窗口内（含前后 2h 余量）。
+        bout_start_hour = 0.0
+        if float(getattr(s, "sleep_bout_start_t", 0.0) or 0.0) > 0.0:
+            bout_start_hour = ((float(s.sleep_bout_start_t) / H2S)
+                               + float(getattr(self, "clock_offset", 0.0))) % 24.0
+
+        # 2026-11-16 修：旧版这里直接调 self._in_sleep_window()，但结算往往
+        # 发生在窗口**已经关闭之后**（插件把 sleep_start/end 设成 0,0 表示
+        # "现在不该睡"），于是 _in_sleep_window 恒为 False，任何夜间片段
+        # 都被误判成"日间午睡"而丢弃 —— 实测「睡 3h → 醒 1h → 再睡 4h」
+        # 的第二段 4h 因此整段丢失。
+        # 现在改用**固化的夜间时段**判断：优先取实例上记录的
+        # sleep_night_window（由引擎在真正入睡时记下），否则回落到
+        # 常规的 23-7 常识窗口。绝不依赖调用瞬间的开关状态。
+        win = getattr(self, "sleep_night_window", None)
+        if not (isinstance(win, (tuple, list)) and len(win) == 2):
+            win = (23.0, 7.0)
+        a_h, b_h = float(win[0]) % 24.0, float(win[1]) % 24.0
+        if a_h > b_h:
+            in_night_window = (bout_start_hour >= a_h) or (bout_start_hour < b_h)
+        else:
+            in_night_window = (a_h <= bout_start_hour < b_h)
+        # 窗口外但离窗口端点很近（刚醒又睡回去）也算夜间片段
+        if not in_night_window:
+            for edge in (a_h, b_h):
+                d = abs(bout_start_hour - edge)
+                d = min(d, 24.0 - d)
+                if d <= 2.0:
+                    in_night_window = True
+                    break
+
+        is_nap = (total_h < min_bout) and (not in_night_window)
+        if is_nap:
+            s.sleep_week_skipped = int(getattr(s, "sleep_week_skipped", 0) or 0) + 1
+            self.bus.emit(Event(s.t, "nap_end", "debug", "小睡结束", {
+                "slept_h": round(total_h, 2),
+                "counts_as_night": False,
+                "reason": f"日间短睡，短于 {min_bout:.1f} 小时门槛",
+            }))
+            s.sleep_bout_start_t = 0.0
+            return
+
+        deep_r = deep_s / slept_s
+        rem_r = rem_s / slept_s
+
+        # ---- 质量评分（0~100），口径对齐 PSQI 成分 ----
+        #   PSQI 的七个成分里，与单夜睡眠结构直接相关的是：
+        #   主观睡眠质量、入睡潜伏期、睡眠时长、睡眠效率、睡眠障碍。
+        #   这里取可量化的四项：
+        #   时长分（40）—— 7~9 h 满分，6 h 明显扣分（AASM 成人推荐 7~9 h）
+        #   深睡分（25）—— 健康成人 N3 占 TST 约 13~23%，取 18% 为中心
+        #   REM 分（20）—— 健康成人 REM 占 TST 约 20~25%，取 22.5% 为中心
+        #   效率分（15）—— 睡眠效率 = TST / 在床时间，85% 以上视为正常
         if total_h >= 7.0:
             dur_score = 40.0
         elif total_h >= 6.0:
             dur_score = 40.0 * (total_h - 5.0) / 2.0
         else:
-            dur_score = max(0.0, 40.0 * (total_h - 4.0) / 2.0)
+            dur_score = max(0.0, 40.0 * (total_h - min_bout) / max(1e-6, 6.0 - min_bout))
 
-        deep_score = 30.0 * max(0.0, 1.0 - abs(deep_r - 0.225) / 0.225)
+        deep_score = 25.0 * max(0.0, 1.0 - abs(deep_r - 0.18) / 0.18)
         rem_score = 20.0 * max(0.0, 1.0 - abs(rem_r - 0.225) / 0.225)
-        cont_score = 10.0 * max(0.0, 1.0 - awake_h * 2.0)
+        # 效率分：85% 及以上满分，往下线性衰减到 60% 归零
+        eff_score = 15.0 * clamp((efficiency - 0.60) / 0.25, 0.0, 1.0)
 
-        s.sleep_quality = clamp(dur_score + deep_score + rem_score + cont_score,
+        s.sleep_quality = clamp(dur_score + deep_score + rem_score + eff_score,
                                 0.0, 100.0)
+        s.last_sleep_hours = total_h   # 供运动门槛判断"昨晚睡够没有"
 
-        # 还债：以睡眠质量为核心，不是只看时长。
-        # 2026-11-14 修：旧实现 eff = min(1, quality/80) 上限封顶，
-        # 于是质量 95 和质量 80 的还债速度完全一样 —— 质量实际上没起作用。
-        # 改为「恢复效率」：把整夜睡出来的有效恢复折算成"等效睡眠小时"。
-        #
-        # 恢复效率 = 时长 × 质量系数
-        #   质量系数 = 0.4 + 0.6 × (quality/100)
-        #   即：质量 100 → 系数 1.0（一小时顶一小时）
-        #       质量 60  → 系数 0.76
-        #       质量 30  → 系数 0.58
-        # 这样"睡 8 小时但整夜浅睡（质量 40）"只有 4.5 小时等效，还不清债。
-        # 先按「昨晚睡够没有」结算缺口 —— 这是睡眠债的主体。
-        # 基准取每晚所需时长（默认 7.5h）。睡得少就欠，睡够不欠。
-        # 注意：这里用原始时长而非等效时长，因为「睡了但质量差」由还债环节的
-        # q_factor 处理，两者不重复扣。
+        # ---- 睡眠债结算 ----
+        # 缺口按「每晚所需时长」算；基准默认 7.5h。
         need = max(4.0, float(getattr(self, "sleep_need_hours", 7.5)))
         shortfall = max(0.0, need - total_h)
         if shortfall > 0.0:
             s.sleep_debt = clamp(s.sleep_debt + shortfall, 0.0, 48.0)
 
-        # 再按质量还债：等效睡眠小时超过 1 小时的部分才抵消债务。
+        # 还债按「等效睡眠小时」：质量差的一小时顶不满一小时。
         q_factor = 0.4 + 0.6 * clamp(s.sleep_quality / 100.0, 0.0, 1.0)
         effective_h = total_h * q_factor
-        if total_h >= 3.0:
-            # 前 1 小时视为入睡过渡，不计入还债
-            s.sleep_debt = clamp(s.sleep_debt - max(0.0, effective_h - 1.0) * 0.9,
-                                 0.0, 48.0)
+        # 前 1 小时视为入睡过渡，不计入还债。
+        s.sleep_debt = clamp(s.sleep_debt - max(0.0, effective_h - 1.0) * 0.9,
+                             0.0, 48.0)
+
+        # ---- 写入 bout 历史，供近 7 日统计 ----
+        bouts = list(getattr(s, "sleep_bouts", None) or [])
+        bouts.append({
+            "end_t": float(s.t),
+            "start_t": float(s.sleep_bout_start_t or (s.t - bout_s)),
+            "hours": round(total_h, 2),
+            "bout_h": round(bout_h, 2),
+            "quality": round(s.sleep_quality, 1),
+            "efficiency": round(efficiency, 3),
+            "light_h": round(light_s / H2S, 2),
+            "deep_h": round(deep_s / H2S, 2),
+            "rem_h": round(rem_s / H2S, 2),
+            "wakes": int(getattr(s, "sleep_bout_wakes", 0) or 0),
+        })
+        s.sleep_bouts = bouts
+        self._recompute_sleep_week()
+
+        s.sleep_bout_start_t = 0.0
 
         self.bus.emit(Event(s.t, "sleep_end", "info", "醒来", {
             "slept_h": round(total_h, 2),
-            "light_h": round(s.dur_light / H2S, 2),
-            "deep_h": round(s.dur_deep / H2S, 2),
-            "rem_h": round(s.dur_rem / H2S, 2),
+            "bout_h": round(bout_h, 2),
+            "efficiency": round(efficiency, 3),
+            "light_h": round(light_s / H2S, 2),
+            "deep_h": round(deep_s / H2S, 2),
+            "rem_h": round(rem_s / H2S, 2),
             "quality": round(s.sleep_quality, 1),
             "cycles": s.stage_index + 1,
+            "counts_as_night": True,
         }))
+
+    # 近 7 日窗口内保留多少段 bout 作为上限（防止无限增长）
+    SLEEP_BOUTS_MAX = 32
+
+    def _recompute_sleep_week(self):
+        """重算近 7 日睡眠汇总（7 日滑动聚合，**不是 PSQI**）。
+
+        【重要 · 命名纪律】不要把这个汇总称作 PSQI。
+        PSQI（Buysse 1989）的官方回顾窗口是**1 个月**，且明确不建议
+        改用其它时间框架；把它说成「近 7 日 PSQI」是公式性错误。
+        这里做的是「PSQI 成分的 7 日类比」：沿用 PSQI 里可量化的成分
+        （睡眠时长 TST、睡眠效率 SE、睡眠障碍/觉醒次数），但窗口取 7 天。
+        为什么取 7 天：单夜波动太大，不足以说明睡眠好坏；7 天是临床上
+        描述「近期睡眠」的常用滑动窗口，也正是用户要求的「看近一周」。
+        文献依据见 docs/血糖与睡眠文献依据.md B 组。
+
+        统计量：
+          nights        —— 窗口内合格 bout 数
+          hours         —— 合格 bout 的睡眠小时合计（TST 之和）
+          quality       —— 按小时加权的平均质量评分
+          efficiency    —— 按小时加权的平均睡眠效率（SE）
+        """
+        s = self.s
+        window_s = max(1.0, float(getattr(self, "sleep_week_window_days", 7.0))) * 24.0 * H2S
+        now = float(s.t)
+        bouts = [b for b in (getattr(s, "sleep_bouts", None) or [])
+                 if isinstance(b, dict) and (now - float(b.get("end_t", 0.0))) <= window_s]
+        # 只保留窗口内的，并按数量上限裁剪（丢最老的）
+        bouts = bouts[-int(self.SLEEP_BOUTS_MAX):]
+        s.sleep_bouts = bouts
+
+        if not bouts:
+            s.sleep_week_hours = 0.0
+            s.sleep_week_quality = 0.0
+            s.sleep_week_efficiency = 0.0
+            s.sleep_week_nights = 0
+            s.sleep_week_updated_t = now
+            return
+
+        total_h = sum(float(b.get("hours", 0.0)) for b in bouts)
+        if total_h <= 0.0:
+            s.sleep_week_hours = 0.0
+            s.sleep_week_quality = 0.0
+            s.sleep_week_efficiency = 0.0
+            s.sleep_week_nights = len(bouts)
+            s.sleep_week_updated_t = now
+            return
+
+        # 按小时加权：睡得长的那一夜对总体评价的贡献更大
+        wq = sum(float(b.get("quality", 0.0)) * float(b.get("hours", 0.0)) for b in bouts)
+        we = sum(float(b.get("efficiency", 0.0)) * float(b.get("hours", 0.0)) for b in bouts)
+        s.sleep_week_hours = round(total_h, 2)
+        s.sleep_week_quality = round(wq / total_h, 1)
+        s.sleep_week_efficiency = round(we / total_h, 3)
+        s.sleep_week_nights = len(bouts)
+        s.sleep_week_updated_t = now
+
 
     # ------------------------------------------------------------------
     # 行为闭环 —— 修复「口渴只升不降」的关键
@@ -1206,6 +1475,26 @@ class BodyEngine:
         s = self.s
         s.gastric_volume = min(1500.0, s.gastric_volume + tot["volume_ml"])
         s.chyme_carb += tot["carb_g"]
+        # GI 分账（2026-11-16）：把这次的碳水按升糖快慢记到两本账上。
+        # 总量仍记在 chyme_carb，两本账只影响后续「吸收进入血液的速率」。
+        try:
+            slow_g, fast_g = food.carb_gi_split(keys)
+        except Exception:
+            slow_g, fast_g = 0.0, 0.0
+        if slow_g > 0.0 or fast_g > 0.0:
+            s.chyme_carb_slow = float(getattr(s, "chyme_carb_slow", 0.0)) + slow_g
+            s.chyme_carb_fast = float(getattr(s, "chyme_carb_fast", 0.0)) + fast_g
+        # 按碳水克数累积加权 GI，供「入血比例」按 GL 折算
+        try:
+            w_gi, w_mass = food.carb_gi_weighted(keys)
+        except Exception:
+            w_gi, w_mass = 0.0, 0.0
+        if w_mass > 0.0:
+            prev_m = float(getattr(s, "gut_carb_gi_mass", 0.0) or 0.0)
+            prev_acc = prev_m * float(getattr(s, "gut_carb_gi_weighted", 0.0) or 0.0)
+            new_m = prev_m + w_mass
+            s.gut_carb_gi_mass = new_m
+            s.gut_carb_gi_weighted = (prev_acc + w_gi * w_mass) / new_m if new_m > 0 else w_gi
         s.chyme_protein += tot["protein_g"]
         s.chyme_fat += tot["fat_g"]
         s.chyme_na += tot["na_mmol"]
@@ -1467,8 +1756,30 @@ class BodyEngine:
         # 2026-11-11：改成胰岛素主导的抑制（门静脉胰岛素是肝糖输出的
         # 第一信号，血糖只作辅助）。原式纯按血糖，加入肠促胰岛素后仍
         # 压不住肝输出，餐后血糖峰值被削到 5.9 反而低于改动前。
+        # 2026-11-16 说明：曾把这里改成 Hill 方程（EC50 29 μU/mL，Rizza 1981
+        # PMID 7018254），思路是该文献确实证明「肝糖输出半最大抑制 29 μU/mL、
+        # 完全抑制约 60 μU/mL，显著低于外周利用的 55 μU/mL」。但直接套用后
+        # 实测白米饭峰值从 8.11 升到 10.87（回归），原因是本模型的 insulin
+        # 是 0~1.6 的相对量纲而非 μU/mL，两者不能直接换算代入。
+        # 已回退为原线性式；若要真正落地该文献，需要先把胰岛素量纲整体
+        # 换算到 μU/mL，属独立改动，不在本次范围。文献依据保留在
+        # docs/血糖与睡眠文献依据.md A5 备查。
         hgp_suppress = clamp(1.0 - max(0.0, s.glucose - 5.0) * 0.30
                              - max(0.0, s.insulin - 0.30) * 0.80, 0.0, 1.0)
+        # 门静脉葡萄糖负荷的直接抑制：肠道正在灌糖时，肝输出应当进一步下调。
+        # 依据 Dimitriadis 2021（PMID 33419065）：餐后肝脏优先处置摄入葡萄糖
+        # 的 50% 以上，从而限制血糖与胰岛素的急性升高 —— 也就是说餐后肝脏
+        # 从「输出者」切换成「净摄取者」，这是独立于胰岛素的一条通路。
+        # 门静脉葡萄糖负荷的直接抑制：肠道正在灌糖时肝输出应进一步下调，
+        # 但幅度必须温和 —— 一试 1 - load/28 就过冲了：低 GI 食物入血慢，
+        # 门静脉负荷长时间处于中位，肝输出被持续压掉大半，结果苹果只涨到
+        # 5.2、牛奶 5.1，几乎不升糖（正常应是缓升到 6 上下）。
+        # 真实机制里这条通路是「辅助」，主力仍是胰岛素（Rizza 1981 已给出
+        # 明确的 EC50），故这里把系数收到 0.35，只做小幅修形。
+        portal_load = float(getattr(s, "gut_glucose", 0.0) or 0.0) + \
+            float(getattr(s, "gut_glucose_slow", 0.0) or 0.0)
+        portal_suppress = clamp(1.0 - portal_load / 28.0 * 0.35, 0.0, 1.0)
+        hgp_suppress = clamp(hgp_suppress * portal_suppress, 0.0, 1.0)
         hepatic_mmol_min = (0.78 * (1.0 + 1.5 * max(0.0, (5.0 - s.glucose) / 3.0))
                             * gly_frac * hgp_suppress)
         # 糖异生：糖原耗尽后肝脏转向脂肪/蛋白来源的糖异生，这是禁食能维持
@@ -1487,6 +1798,12 @@ class BodyEngine:
         # 外周摄取对胰岛素的斜率 0.90 -> 0.45：真实餐后葡萄糖处置里
         # 肝输出抑制占大头，肌肉摄取是次要项。旧斜率让胰岛素一升就把
         # 血糖清光，峰值根本起不来。
+        # 2026-11-16：曾试着把这里改成 Hill 式（EC50 55 μU/mL，Rizza 1981），
+        # 想与肝输出配对，但实测与既有线性式不匹配 —— 高 GI 峰值冲到 10.87，
+        # 属回归，已回退。文献给的 EC50 是**方向性证据**（肝脏比外周敏感），
+        # 而不是可以直接替换本模型相对单位系数的绝对值，因为 insulin 字段
+        # 是 0~1.6 的相对量纲，不是 μU/mL。要做这件事必须先把胰岛素量纲
+        # 整体换算到文献单位，属独立改动，不在本次范围。
         tissue_mmol_min = 0.19 * s.glucose * (0.55 + 0.45 * s.insulin)
         if s.exercising:
             tissue_mmol_min *= 1.8
@@ -1580,6 +1897,39 @@ class BodyEngine:
     # 0.70 → 实测同餐峰值 6.98 mmol/L（升 ~2.0），与生理一致。
     CARB_TO_BLOOD = 0.70
 
+    # ---- GI 对「入血比例」的调制（2026-11-16 新增）----
+    # 文献依据（docs/血糖与睡眠文献依据.md A3，Vlachos 2020 PMID 32471238）：
+    #   GL（血糖负荷）= GI × 碳水克数，共同决定餐后反应；
+    #   低 GI 食物消化吸收更慢，餐后血糖与胰岛素反应更平缓。
+    # 也就是说 GI 同时影响两件事：**入血有多快**（速率）和 **入血有多少**
+    # （幅度）。本模型此前只做了速率侧（快慢双池），幅度侧完全没做 ——
+    # 结果低 GI 食物只是被"拖长"，总负荷一分不少，峰值仍然偏高。
+    #
+    # 这里按 GI 把「有多少碳水以葡萄糖形式进入体循环」做线性缩放：
+    #   GI 100（纯葡萄糖）→ 满额 0.70
+    #   GI  50（中低）    → 约 0.55
+    #   GI  30（很低）    → 约 0.45
+    # 底部保留 0.45 的下限：碳水终究要被吸收，低 GI 不等于"不吸收"，
+    # 剩下的差额按既有逻辑进肝糖原账本（见 _metabolic 里的 glycogen 项）。
+    GI_RANGE_LOW = 30.0
+    GI_RANGE_HIGH = 100.0
+    CARB_TO_BLOOD_GI_FLOOR = 0.65   # GI 处于最低端时保留的比例（相对 CARB_TO_BLOOD）
+
+    def _carb_to_blood_for_gi(self, gi: float) -> float:
+        """按升糖指数折算「进入体循环的比例」。
+
+        gi <= 0（非碳水食物）返回默认值；调用方应自行跳过这类条目。
+        """
+        try:
+            gi = float(gi)
+        except (TypeError, ValueError):
+            return self.CARB_TO_BLOOD
+        if gi <= 0.0:
+            return self.CARB_TO_BLOOD
+        t = clamp((gi - self.GI_RANGE_LOW) / (self.GI_RANGE_HIGH - self.GI_RANGE_LOW), 0.0, 1.0)
+        factor = self.CARB_TO_BLOOD_GI_FLOOR + (1.0 - self.CARB_TO_BLOOD_GI_FLOOR) * t
+        return self.CARB_TO_BLOOD * factor
+
     # 乙醇分布容积（Widmark r × 体重 70 kg）：0.68 L/kg × 70 = 47.6 L
     ETHANOL_VD = 47.6
 
@@ -1594,8 +1944,18 @@ class BodyEngine:
         # 现改为 胃 -> 十二指肠（酸中和/渗透压感受）-> 空肠（吸收）-> 回肠（刹车）。
         if s.gastric_volume > 0.05:
             # 液体半排空约 20 min，混合固体餐约 90 min。用「可自由水占比」插值。
+            #
+            # 2026-11-16 校准：旧值使餐后血糖峰值出现在 95~100 min，
+            # 而文献实测健康人混合餐峰值在 46~50 min（Freckmann 2007,
+            # PMID 19885137：24 名健康志愿者，餐后峰值时点平均 46-50 min）。
+            # 峰值推迟一小时的直接原因是这条通路是四级串联
+            # （胃 -> 十二指肠 -> 空肠 -> 肠糖池 -> 血），每级各有一个
+            # 时间常数，旧参数把它们叠成了两倍生理延迟。
+            # 这里按文献把「混合固体餐」的半排空从 90 min 收到 55 min
+            # （真实混合膳食的胃半排空常见报道就在 60-90 min 区间下限，
+            # 而碳水主导的一餐更快）。峰值时点因此前移，量级对上文献。
             liquid_bias = clamp(s.chyme_water / max(s.gastric_volume, 1.0), 0.0, 1.0)
-            half_min = 90.0 - 70.0 * liquid_bias
+            half_min = 40.0 - 22.0 * liquid_bias
             # 固形物按质量判定：蛋白 + 脂肪 + 碳水都算固形物。
             solid_g = s.chyme_protein + s.chyme_fat + s.chyme_carb * 0.25
             if solid_g < 1.0:
@@ -1605,8 +1965,31 @@ class BodyEngine:
 
             s.gastric_volume = max(0.0, s.gastric_volume * (1.0 - frac))
 
-            # 各成分按比例离胃；脂肪排空最慢（0.6 倍），蛋白 0.9 倍
+            # 各成分按比例离胃；脂肪排空最慢（0.6 倍），蛋白 0.9 倍。
+            #
+            # 2026-11-16 GI 分账：高 GI 碳水在胃内也排空更快（淀粉已糊化、
+            # 结构松散，机械与化学消化都更快），低 GI 碳水（膳食纤维多、
+            # 结构致密）滞留在胃里的时间更长。这里让快账按 frac、慢账按
+            # frac * 0.65 离胃，于是「同样 56 g 碳水，白米饭比苹果更早进
+            # 小肠」，这正是文献里低 GI 食物血糖曲线更平缓的第一个原因。
             carb_out = s.chyme_carb * frac
+            fast_pool = float(getattr(s, "chyme_carb_fast", 0.0) or 0.0)
+            slow_pool = float(getattr(s, "chyme_carb_slow", 0.0) or 0.0)
+            if fast_pool > 0.0 or slow_pool > 0.0:
+                fast_out = fast_pool * frac
+                slow_out = slow_pool * frac * 0.65
+                s.chyme_carb_fast = max(0.0, fast_pool - fast_out)
+                s.chyme_carb_slow = max(0.0, slow_pool - slow_out)
+                # 两本账的离胃总量按比例缩放到与实际 carb_out 一致，
+                # 保证总量守恒（chyme_carb 才是权威值）。
+                pool_out = fast_out + slow_out
+                if pool_out > 1e-9:
+                    scale = carb_out / pool_out
+                    fast_out *= scale
+                    slow_out *= scale
+                fast_frac_of_carb = fast_out / carb_out if carb_out > 1e-9 else 0.5
+            else:
+                fast_frac_of_carb = 0.5
             prot_out = s.chyme_protein * frac * 0.9
             fat_out = s.chyme_fat * frac * 0.6
             na_out = s.chyme_na * frac
@@ -1640,6 +2023,16 @@ class BodyEngine:
             # 排入十二指肠（不再直接入血）
             s.duodenum_volume = min(500.0, s.duodenum_volume + max(0.0, water_out))
             s.duodenum_carb += carb_out
+            # GI 配比随食糜往下游传递：用碳水加权的滑动平均，
+            # 避免一顿饭里先吃高 GI 后吃低 GI 时配比被最后一次覆盖。
+            if carb_out > 1e-9:
+                prev = float(getattr(s, "duodenum_carb_fast_frac", 0.5) or 0.5)
+                prev_w = max(0.0, s.duodenum_carb - carb_out)
+                tot_w = prev_w + carb_out
+                s.duodenum_carb_fast_frac = (
+                    (prev * prev_w + fast_frac_of_carb * carb_out) / tot_w
+                    if tot_w > 1e-9 else fast_frac_of_carb
+                )
             s.duodenum_protein += prot_out
             s.duodenum_fat += fat_out
 
@@ -1647,7 +2040,9 @@ class BodyEngine:
         if s.duodenum_volume > 0.05:
             # 十二指肠转运很快（半时约 12 min），主要作用是让食糜接触
             # 胰液/胆汁并把信号传给腺体，不是主要吸收场所。
-            k_duo = 1.0 - math.exp(-math.log(2.0) / (12.0 * 60.0) * dt)
+            # 2026-11-16 校准：12 -> 6 min。十二指肠主要是酸中和与渗透压感受，
+            # 转运本身很快，不应成为糖吸收的限速环节。
+            k_duo = 1.0 - math.exp(-math.log(2.0) / (6.0 * 60.0) * dt)
             duo_frac = clamp(k_duo, 0.0, 0.30)
             duo_carb = s.duodenum_carb * duo_frac
             duo_prot = s.duodenum_protein * duo_frac
@@ -1668,6 +2063,16 @@ class BodyEngine:
             # 剩余进空肠
             s.jejunum_volume = min(900.0, s.jejunum_volume + max(0.0, s.duodenum_volume) * duo_frac)
             s.jejunum_carb += duo_carb * 0.85
+            # 十二指肠 -> 空肠：GI 配比同样按碳水加权传递
+            if duo_carb > 1e-9:
+                d_frac = clamp(float(getattr(s, "duodenum_carb_fast_frac", 0.5) or 0.5), 0.0, 1.0)
+                prev_j = clamp(float(getattr(s, "jejunum_carb_fast_frac", 0.5) or 0.5), 0.0, 1.0)
+                prev_w = max(0.0, s.jejunum_carb - duo_carb * 0.85)
+                tot_w = prev_w + duo_carb * 0.85
+                s.jejunum_carb_fast_frac = (
+                    (prev_j * prev_w + d_frac * duo_carb * 0.85) / tot_w
+                    if tot_w > 1e-9 else d_frac
+                )
             s.jejunum_protein += duo_prot * 0.90
             s.jejunum_fat += duo_fat * 0.95
         else:
@@ -1679,7 +2084,11 @@ class BodyEngine:
             # 2026-11-11：半时 35 -> 14 min。空肠绒毛表面积巨大，糖/氨基酸
             # 吸收极快（真人口服葡萄糖后 15 min 内血糖即明显上升）。旧的
             # 35 min 把整条曲线拖成"3 小时缓坡"，峰值推迟到 122 min。
-            k_jej = 1.0 - math.exp(-math.log(2.0) / (14.0 * 60.0) * dt)
+            # 2026-11-16 校准：14 -> 8 min。空肠绒毛表面积巨大、刷状缘酶与
+            # SGLT1/GLUT2 转运体密集，葡萄糖吸收本就是全消化道最快的一段。
+            # 旧值 14 min 与胃排空、十二指肠串联后把肠糖池峰值推到 60 min，
+            # 导致血糖峰值被迫推迟到 95-100 min（文献实测 46-50 min）。
+            k_jej = 1.0 - math.exp(-math.log(2.0) / (8.0 * 60.0) * dt)
             jej_frac = clamp(k_jej, 0.0, 0.30)
             j_carb = s.jejunum_carb * jej_frac
             j_prot = s.jejunum_protein * jej_frac
@@ -1689,8 +2098,23 @@ class BodyEngine:
             s.jejunum_fat -= j_fat
             s.jejunum_volume = max(0.0, s.jejunum_volume * (1.0 - jej_frac))
             # 空肠吸收：碳水 92%、蛋白 78%、脂肪 55%（脂肪主在回肠/淋巴）
-            s.gut_glucose += j_carb * 0.92 * 1000.0 / 180.0 * self.CARB_TO_BLOOD
-            s.glycogen = min(500.0, s.glycogen + j_carb * 0.92 * (1.0 - self.CARB_TO_BLOOD) * 0.8)
+            # GI 分速度入血（2026-11-16）：
+            # 吸收进来的葡萄糖进入两个池子 —— 快池按短半时入血（高 GI，
+            # 血糖快速上冲），慢池按长半时入血（低 GI，缓升缓降）。
+            # 两者总量守恒，只是「入血的时间分布」不同，这正是 GI 的
+            # 生理含义：同样的碳水总量，不同的血糖曲线形状。
+            _fast_r = clamp(float(getattr(s, "jejunum_carb_fast_frac", 0.5) or 0.5), 0.0, 1.0)
+            # GL 口径的幅度调制（2026-11-16）：按这顿的加权 GI 折算
+            # 「有多少碳水以葡萄糖进入体循环」，其余按既有逻辑回补肝糖原。
+            # 这一步补的是「幅度」，与上面的「速率」分离 —— 文献 A3 明确
+            # 要求二者分开：GI 决定吸收快慢，GL(=GI×克数) 决定负荷大小。
+            _gi_w = float(getattr(s, "gut_carb_gi_weighted", 0.0) or 0.0)
+            _ctb = self._carb_to_blood_for_gi(_gi_w) if _gi_w > 0.0 else self.CARB_TO_BLOOD
+            _absorbed_mmol = j_carb * 0.92 * 1000.0 / 180.0 * _ctb
+            s.gut_glucose += _absorbed_mmol * _fast_r
+            s.gut_glucose_slow = (float(getattr(s, "gut_glucose_slow", 0.0) or 0.0)
+                                  + _absorbed_mmol * (1.0 - _fast_r))
+            s.glycogen = min(500.0, s.glycogen + j_carb * 0.92 * (1.0 - _ctb) * 0.8)
             s.gut_amino += j_prot * 0.78
             s.fat_reserve = min(400.0, s.fat_reserve + j_fat * 0.55)
             # 未吸收部分入回肠
@@ -1734,12 +2158,25 @@ class BodyEngine:
         s.ghrelin = approach_tau(s.ghrelin, ghrelin_t, dt, 35.0 * 60.0)
 
         # ---- 肠吸收：糖池 -> 血（空肠已分段，这里只做最终入血）----
+        # 2026-11-16：拆成快慢双池。旧实现只有一个池、半时 8 min，于是
+        # 所有碳水同速入血 —— 苹果（GI 36）与白米饭（GI 73）的餐后曲线
+        # 几乎重合（实测两者峰值都在 95 分钟左右）。GI 的本质就是
+        # 「同一份碳水，入血的时间分布不同」，故这里按 GI 分两个半时：
+        #   快池（高 GI） 半时 8 min  —— 葡萄糖/白面包/米饭，快速上冲
+        #   慢池（低 GI） 半时 42 min —— 水果/豆类/全谷，缓升缓降
         if s.gut_glucose > 1e-9:
             # 半时 18 -> 8 min：门静脉到体循环的转运本身只需几分钟。
             k_abs = math.log(2.0) / (8.0 * 60.0)
             absorbed = s.gut_glucose * (1.0 - math.exp(-k_abs * dt))
             s.gut_glucose -= absorbed
             s.glucose = clamp(s.glucose + absorbed / 14.0, 2.0, 25.0)
+        if float(getattr(s, "gut_glucose_slow", 0.0) or 0.0) > 1e-9:
+            # 慢池半时 42 min。低 GI 食物真正的降糖机制有一半在「延缓吸收」，
+            # 另一半在「吸收后仍以较慢速度进入循环」，这里体现后半段。
+            k_slow = math.log(2.0) / (42.0 * 60.0)
+            absorbed_slow = s.gut_glucose_slow * (1.0 - math.exp(-k_slow * dt))
+            s.gut_glucose_slow -= absorbed_slow
+            s.glucose = clamp(s.glucose + absorbed_slow / 14.0, 2.0, 25.0)
 
         # ---- 氨基酸池：蛋白 -> 糖原（糖异生）+ 缓慢供能 ----
         if s.gut_amino > 1e-9:

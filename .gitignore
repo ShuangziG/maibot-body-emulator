@@ -13,9 +13,10 @@ logs/
 *.log
 *.log.jsonl
 
-# 备份
+# 备份（覆盖各种命名：.bak / .bak_xxx / .bak.xxx / xxx.bak.yyy）
 *.bak
-*.bak_*
+*.bak*
+*.orig
 .backup_*/
 
 # 编辑器 / 系统
@@ -27,6 +28,7 @@ desktop.ini
 
 # 开发期临时产物（不进仓库）
 _test_artifacts/
+charts/
 _wave_preview.*
 CHANGELOG_DEV.md
 apk_report/

@@ -242,8 +242,12 @@ interval_seconds = 60.0   # 拉取间隔，不建议低于 30
 6. **体温不受环境温度影响**：没有室内外温度输入，只由自身产热散热决定。
 7. **血压没有长期重构**：长期高钠不会产生血管结构变化，只体现为当次的容量和阻力变化。
 8. **睡眠四态占比是估算**：90 分钟周期与各态比例取自通用区间，没有逐夜实测支撑；睡眠债按小时线性累积，也没做个体差异。
-9. **月经激素曲线是形态近似**：E2/P4 的形状按生理常识搭，不是定量内分泌模型；痛经强度由前列腺素线性映射，未考虑个体差异与用药。
-10. **DOMS 不区分肌群**：只建模整体酸痛程度，所以「今天只有腿疼」这种情况不体现。
+9. **「连续睡眠 ≥4 小时才算一夜」是工程取舍，不是文献结论**：文献中不存在这个阈值，它的作用只是把午睡挡在「昨晚睡了多久」的统计之外。同理「近 7 日汇总」是 PSQI 成分的周度类比，PSQI 官方回顾窗口是 1 个月，本插件不称它为 PSQI。
+10. **月经激素曲线是形态近似**：E2/P4 的形状按生理常识搭，不是定量内分泌模型；痛经强度由前列腺素线性映射，未考虑个体差异与用药。
+11. **DOMS 不区分肌群**：只建模整体酸痛程度，所以「今天只有腿疼」这种情况不体现。
+12. **血糖峰值比真人来得晚**：餐后峰值约在 60~70 分钟，真实生理约 45~50 分钟。原因是消化道按「胃→十二指肠→空肠→糖池→血」五段串联建模，每段各有延迟，叠加后整体后移；胃排空也用了体积一阶衰减，没有做真实的分相排空。
+13. **精制碳水峰值偏高**：白米饭（56 g 净碳水）单吃时峰值约 8.3，健康人参考值 6~7.5，属偏高但未越过 7.8 的餐后上限。
+14. **胰岛素量纲是相对值**：模型的 `insulin` 是 0~1.6 的相对量纲，不是 μU/mL，因此文献里以 μU/mL 给出的定量结论（如肝糖输出半抑制 29 μU/mL）无法直接代入，只能作方向性参考。
 
 ---
 
@@ -281,8 +285,14 @@ interval_seconds = 60.0   # 拉取间隔，不建议低于 30
 | [R4] | Hotfiel T, et al. Advances in Delayed-Onset Muscle Soreness (DOMS): Part I. *Sportverletz Sportschaden*. 2018;32(4):243-250. PMID 30537791 | DOMS 48–72 小时达峰 |
 | [R5] | Doma K, et al. The Repeated Bout Effect of Multiarticular Exercises. *J Strength Cond Res*. 2023;37(12):2504-2515. PMID 38015738 | 重复运动效应（习惯抑制酸痛） |
 | [R6] | Durmer JS, Dinges DF. Neurocognitive consequences of sleep deprivation. *Semin Neurol*. 2005;25(1):117-129. PMID 15798944 | 微睡眠与强制睡眠机制 |
+| [R7] | Freckmann G, et al. Continuous glucose profiles in healthy subjects under everyday life conditions and after different meals. *J Diabetes Sci Technol*. 2007;1(5):695-703. PMID 19885137 | 餐后血糖峰值时点定标 |
+| [R8] | Shah VN, et al. Continuous Glucose Monitoring Profiles in Healthy Nondiabetic Participants. *J Clin Endocrinol Metab*. 2019;104(10):4356-4364. PMID 31127824 | 健康人血糖正常区间 |
+| [R9] | Vlachos D, et al. Glycemic Index (GI) or Glycemic Load (GL) and Dietary Interventions. *Nutrients*. 2020;12(6):1561. PMID 32471238 | GI 决定速率、GL 决定幅度 |
+| [R10] | Rizza RA, Mandarino LJ, Gerich JE. Dose-response characteristics for effects of insulin on production and utilization of glucose in man. *Am J Physiol*. 1981;240(6):E630-E639. PMID 7018254 | 肝糖输出比外周摄取更敏感（结论备查） |
 
 完整的取用内容、查阅方式（PubMed E-utilities）以及**所有「估算」参数清单**见仓库根目录的 [`REFERENCES.md`](REFERENCES.md)。没有查过的不写进去——凭常识定的数值在代码里单独标了「估算」。
+
+血糖与睡眠两部分改动的详细文献依据（含数值核对与未核实清单）见 [`docs/血糖与睡眠文献依据.md`](docs/血糖与睡眠文献依据.md)。
 
 本插件不是医疗器械，也不是教学工具。**所有医疗数据均为模拟，不能用于医学判断和诊断。任何健康问题请咨询执业医师。**
 

@@ -83,6 +83,17 @@ class BodyState:
     # 十二指肠/空肠/回肠的吸收类型吸收。这里用体积 + 逐项成分近似该过程。
     gastric_volume: float = 0.0   # 胃内体积 mL          [APK: GastricVolume]
     chyme_carb: float = 0.0       # 胃内待排空碳水 g
+    # ---- 碳水升糖指数加权账本（2026-11-16 新增）----
+    # 背景：食物表里每一项都有 gi 字段（葡萄糖=100），但引擎此前从未读取，
+    # 于是白米饭（GI 73）和苹果（GI 36）在模型里以完全相同的速度入血。
+    # 实测两者餐后曲线几乎重合、峰值都跑到 95 分钟，与生理明显不符。
+    #
+    # 处理方式：把胃/肠里的碳水按 GI 分成两本账 —— 慢速与快速，各自有
+    # 不同的排空/吸收速率常数。chyme_carb 仍是总量（保持原有守恒与
+    # 排空公式不变），这两本账只用来决定「被吸收的这部分里，有多少按快
+    # 速率入血」。这样不破坏既有的胃排空、肠激素、糖原闭环。
+    chyme_carb_slow: float = 0.0  # 胃内低 GI 碳水 g（GI < 55）
+    chyme_carb_fast: float = 0.0  # 胃内高 GI 碳水 g（GI >= 55）
     chyme_protein: float = 0.0    # 蛋白 g
     chyme_fat: float = 0.0        # 脂肪 g
     chyme_water: float = 0.0      # 可自由水 mL          [APK: WaterAbsorption]
@@ -106,7 +117,16 @@ class BodyState:
     ileum_residue: float = 0.0     # 回肠末端残余 g（触发 PYY/GLP-1 刹车）
 
     # 已排空、正由肠壁吸收入血（一阶速率）
-    gut_glucose: float = 0.0      # 待入血葡萄糖 mmol
+    gut_glucose: float = 0.0      # 待入血葡萄糖 mmol（高 GI 快池）
+    gut_glucose_slow: float = 0.0 # 待入血葡萄糖 mmol（低 GI 慢池，2026-11-16）
+    # 胃肠道内碳水的 GI 配比（0=全慢，1=全快），由胃 -> 十二指肠 -> 空肠逐级传递。
+    # 这是「同一份碳水、不同的入血时间分布」的载体，见 engine._metabolic。
+    duodenum_carb_fast_frac: float = 0.5
+    jejunum_carb_fast_frac: float = 0.5
+    # 胃肠道内碳水按克数加权的平均 GI（0 = 无碳水）。用于把「入血比例」
+    # 按 GL 口径折算，见 engine._carb_to_blood_for_gi。
+    gut_carb_gi_weighted: float = 0.0
+    gut_carb_gi_mass: float = 0.0
     gut_amino: float = 0.0        # 待入血氨基酸（按蛋白 g 记）
 
     # ---- 胃肠激素（APK 腺体族：Gastrin/Secretin/CCK/GIP/PYY/GLP-1/Ghrelin）----
@@ -184,7 +204,7 @@ class BodyState:
     sleep_depth: float = 0.0      # 睡眠深度 0=清醒 1=深睡（由阶段派生）
     sleeping: bool = False        # 是否处于睡眠（sleep_depth > 0.5）
     sleep_debt: float = 0.0       # 睡眠债（小时），长期熬夜累积
-    last_sleep_t: float = 0.0     # 上次入睡的仿真时刻
+    last_sleep_t: float = 0.0     # 上次入睡的仿真时刻（2026-11-16 修复：此前被 or 短路钉死）
 
     # ---- 睡眠周期（2026-11-14 新增，四态分期）----
     # 参考 Oura/PSG 的分期口径：一个 NREM-REM 周期约 90 分钟，
@@ -222,6 +242,37 @@ class BodyState:
     wake_pending: bool = False    # 处于「被唤醒后等待重新入睡」状态
     wake_since: float = 0.0       # 本次唤醒的仿真时刻
     last_wake_reason: str = ""    # 最近一次唤醒原因（展示用）
+
+    # ---- 连续睡眠区间（2026-11-16 新增）----
+    # 背景：旧实现用 dur_light/dur_deep/dur_rem 的整体累计作为「这一觉」的时长，
+    # 但这两个量既不在每个夜晚开头清零，又会在中途醒来后继续往同一份账本里加，
+    # 于是睡了三晚 8 小时会累计成 23.9 小时（实测），而「睡了 6 小时只算半小时」
+    # 来自同一处口径混乱。真实口径应该按「连续睡眠区间（sleep bout）」记账：
+    # 从睡着到醒来是一段 bout，中间被唤醒打断就分段。
+    #
+    # 另据 PSQI 的设计（Buysse 1989），睡眠质量按「回顾窗口内」的总体来评价，
+    # 而不是只看某一觉，故同时保留近 7 日的 bout 历史。
+    sleep_bout_start_t: float = 0.0   # 当前 bout 的入睡时刻（0 = 当前不在 bout 中）
+    sleep_bout_end_t: float = 0.0     # 上一段 bout 结束时刻（判定间隙容忍用）
+    sleep_bout_stage_sec: float = 0.0 # 当前 bout 内的分期累计时长（秒，不含清醒）
+    sleep_bout_awake_sec: float = 0.0 # 当前 bout 内的清醒时长（秒）
+    sleep_bout_light_sec: float = 0.0 # 当前 bout 浅睡（秒）
+    sleep_bout_deep_sec: float = 0.0  # 当前 bout 深睡（秒）
+    sleep_bout_rem_sec: float = 0.0   # 当前 bout REM（秒）
+    sleep_bout_wakes: int = 0         # 当前 bout 内被唤醒次数
+    # 最近若干段「合格」的连续睡眠（只看 >= min_bout_hours 的 bout，午睡不计）。
+    # 每项形如 {"end_t": 仿真秒, "hours": 连续睡眠小时, "quality": 0~100,
+    #           "light_h":..., "deep_h":..., "rem_h":..., "efficiency":...}
+    sleep_bouts: list = field(default_factory=list)
+    # 近 7 日汇总（7 日滑动聚合，PSQI 成分的周度类比，**不是 PSQI**）：总睡眠小时、平均睡眠效率、平均评分、合格夜数、
+    # 被过滤掉（<4h 或午睡）的段数。由 _recompute_sleep_week() 计算。
+    sleep_week_hours: float = 0.0
+    sleep_week_quality: float = 0.0
+    sleep_week_efficiency: float = 0.0
+    sleep_week_nights: int = 0
+    sleep_week_skipped: int = 0
+    # 上一次 bout 结束的仿射时刻（用于 7 日窗口裁剪）
+    sleep_week_updated_t: float = 0.0
 
     # ---- 月经周期（2026-11-14 新增，双相位机）----
     # 依据 LIFE.apk 元数据：MenstrualPhase(Follicular/Ovulation/Luteal) 与

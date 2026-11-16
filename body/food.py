@@ -436,6 +436,79 @@ def combo_summary(keys) -> str:
     return " + ".join(FOODS[k].label for k in keys if k in FOODS)
 
 
+# ----------------------------------------------------------------------
+# 升糖指数（GI）加权（2026-11-16 新增）
+# ----------------------------------------------------------------------
+# 食物表每一项都有 gi 字段，但引擎此前从未读取，导致白米饭与苹果在模型里
+# 以相同速度入血（实测两者餐后峰值都在 95 分钟、曲线几乎重合）。
+# 这里提供两个纯函数，供引擎把 GI 折算成「吸收快慢」。
+#
+# 分级依据：国际通用的 GI 分级为 低 GI ≤55、中 GI 56-69、高 GI ≥70
+# （FAO/WHO 1998 与后续共识沿用）。取 55 作为快慢分界。
+GI_SLOW_MAX = 55
+
+
+def carb_gi_split(keys, ratios: dict = None) -> tuple:
+    """把一组食物的碳水拆成 (慢速 GI 碳水, 快速 GI 碳水)，单位 g。
+
+    GI 为 0 或缺失（纯蛋白/脂肪/水/酒精）的条目不计入任何一本账。
+    ratios 非空时按 key 的比例缩放（与 _combo_totals_ratio 口径一致）。
+    """
+    slow = 0.0
+    fast = 0.0
+    for key in keys:
+        try:
+            f = get(key)
+        except KeyError:
+            continue
+        carb = float(getattr(f, "carb_g", 0.0) or 0.0)
+        gi = float(getattr(f, "gi", 0) or 0)
+        if carb <= 0.0 or gi <= 0.0:
+            continue
+        r = 1.0
+        if ratios:
+            try:
+                r = max(0.0, min(20.0, float(ratios.get(key, 1.0))))
+            except (TypeError, ValueError):
+                r = 1.0
+        amount = carb * r
+        if gi <= GI_SLOW_MAX:
+            slow += amount
+        else:
+            fast += amount
+    return slow, fast
+
+
+def carb_gi_weighted(keys, ratios: dict = None) -> tuple:
+    """按碳水克数加权算出这组食物的平均 GI。
+
+    返回 (加权 GI, 参与计算的碳水克数)。没有碳水时返回 (0.0, 0.0)。
+    """
+    mass = 0.0
+    acc = 0.0
+    for key in keys:
+        try:
+            f = get(key)
+        except KeyError:
+            continue
+        carb = float(getattr(f, "carb_g", 0.0) or 0.0)
+        gi = float(getattr(f, "gi", 0) or 0)
+        if carb <= 0.0 or gi <= 0.0:
+            continue
+        r = 1.0
+        if ratios:
+            try:
+                r = max(0.0, min(20.0, float(ratios.get(key, 1.0))))
+            except (TypeError, ValueError):
+                r = 1.0
+        amount = carb * r
+        mass += amount
+        acc += amount * gi
+    if mass <= 0.0:
+        return 0.0, 0.0
+    return acc / mass, mass
+
+
 def combo_totals(keys) -> dict:
     """合计一组食物的全部成分，用于写事件与自检。"""
     tot = {"volume_ml": 0.0, "water_ml": 0.0, "na_mmol": 0.0, "carb_g": 0.0,

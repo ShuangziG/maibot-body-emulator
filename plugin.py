@@ -28,6 +28,7 @@ from maibot_sdk.types import (
 )
 
 from .body import BodyEngine, BodyState, EventBus, brief, build_html, describe
+from .body.translate import feeling_bar_pct, feeling_word
 from .body.food import (
     _FOOD_EXTRA_ADDED,
     ALL_FOODS,
@@ -45,7 +46,7 @@ from .body.translate import FEELING_LEVELS, drunk_level, eat_phase, phase
 from .config import LifeBodyConfig
 from .link import LifeLink
 
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.2.1"
 H2S = 3600.0
 SAVE_FILE = "body_state.json"
 
@@ -69,8 +70,11 @@ VITALS = [
     ("map", "平均动脉压", "mmHg", 0, (70.0, 105.0), "偏低", "偏高"),
 ]
 
+# (字段, 展示名)。展示名要保证「数值越高 = 该词越正向」，否则会出现
+# 「饥饿：90（不饿）」这种标签与值打架的读法。饥饿/口渴两项因此改名为
+# 饱腹/水分 —— 引擎内部字段不变，只是界面用词跟着数值方向走。
 FEELINGS = [
-    ("energy", "精力"), ("hunger", "饥饿"), ("thirst", "口渴"),
+    ("energy", "精力"), ("hunger", "饱腹"), ("thirst", "水分"),
     ("stress", "压力"), ("pain", "疼痛"), ("depression", "心境"),
 ]
 
@@ -441,16 +445,36 @@ class LifeBodyPlugin(MaiBotPlugin):
         }
 
     def _sleep_view(self) -> dict[str, Any]:
-        """睡眠面板：四态分期、整夜结构、质量评分、睡眠债。"""
+        """睡眠面板：四态分期、整夜结构、质量评分、睡眠债、近 7 日汇总。
+
+        2026-11-16 起「时长」按连续睡眠区间（bout）口径给出：
+          total_h   —— 当前这一觉（或最近结束的一觉）的实际睡眠时长，
+                       不含中途清醒；短于 min_sleep_bout_hours 的午睡
+                       不会被写成"昨晚睡了 X 小时"。
+          week_*    —— 近 7 日汇总（PSQI 式回顾窗口），用户要求的
+                       "能看近一周的睡眠质量"就是这四个字段。
+        """
 
         s = self._s
         stage_zh = {"awake": "清醒", "light": "浅睡", "deep": "深睡", "rem": "快速眼动"}
-        total = s.dur_light + s.dur_deep + s.dur_rem
+        # 时长口径：优先用当前 bout 的账本（睡到一半也能看到真实累计），
+        # bout 未开始（刚睡完已结算）则回落到最近一次合格 bout 的时长。
+        bout_light = float(getattr(s, "sleep_bout_light_sec", 0.0) or 0.0)
+        bout_deep = float(getattr(s, "sleep_bout_deep_sec", 0.0) or 0.0)
+        bout_rem = float(getattr(s, "sleep_bout_rem_sec", 0.0) or 0.0)
+        bout_total = bout_light + bout_deep + bout_rem
+        if bout_total > 0.0:
+            total = bout_total
+            light_s, deep_s, rem_s = bout_light, bout_deep, bout_rem
+        else:
+            total = s.dur_light + s.dur_deep + s.dur_rem
+            light_s, deep_s, rem_s = s.dur_light, s.dur_deep, s.dur_rem
         hours = total / H2S
 
         def pct(x: float) -> float:
             return round(100.0 * x / total, 1) if total > 0 else 0.0
 
+        bouts = list(getattr(s, "sleep_bouts", None) or [])
         return {
             "stage": s.sleep_stage,
             "stage_text": stage_zh.get(s.sleep_stage, s.sleep_stage),
@@ -461,12 +485,26 @@ class LifeBodyPlugin(MaiBotPlugin):
             "debt_h": _r(s.sleep_debt, 2),
             "quality": _r(s.sleep_quality, 0),
             "total_h": _r(hours, 2),
-            "light_h": _r(s.dur_light / H2S, 2),
-            "deep_h": _r(s.dur_deep / H2S, 2),
-            "rem_h": _r(s.dur_rem / H2S, 2),
-            "light_pct": pct(s.dur_light),
-            "deep_pct": pct(s.dur_deep),
-            "rem_pct": pct(s.dur_rem),
+            "light_h": _r(light_s / H2S, 2),
+            "deep_h": _r(deep_s / H2S, 2),
+            "rem_h": _r(rem_s / H2S, 2),
+            "light_pct": pct(light_s),
+            "deep_pct": pct(deep_s),
+            "rem_pct": pct(rem_s),
+            # ---- 连续睡眠区间口径（2026-11-16）----
+            "bout_active": bool(float(getattr(s, "sleep_bout_start_t", 0.0) or 0.0) > 0.0),
+            "last_sleep_hours": _r(getattr(s, "last_sleep_hours", 0.0), 2),
+            "counts_as_night": bool(
+                hours >= float(getattr(self._engine, "min_sleep_bout_hours", 4.0) or 0.0)
+            ) if hours > 0 else False,
+            "min_bout_hours": _r(getattr(self._engine, "min_sleep_bout_hours", 4.0), 1),
+            # ---- 近 7 日汇总（7 日滑动聚合，不是 PSQI：PSQI 官方窗口是 1 个月）----
+            "week_nights": int(getattr(s, "sleep_week_nights", 0) or 0),
+            "week_hours": _r(getattr(s, "sleep_week_hours", 0.0), 2),
+            "week_quality": _r(getattr(s, "sleep_week_quality", 0.0), 0),
+            "week_efficiency": _r(getattr(s, "sleep_week_efficiency", 0.0), 3),
+            "week_skipped": int(getattr(s, "sleep_week_skipped", 0) or 0),
+            "bouts": bouts[-7:],
             # 夜间唤醒统计（2026-11-14）
             "wake_count": int(s.wake_count),
             "wake_by_message": int(s.wake_by_message),
@@ -1254,7 +1292,14 @@ class LifeBodyPlugin(MaiBotPlugin):
                 feelings.append({
                     "key": field, "label": label,
                     "value": _r(value, 0),
-                    "text": _vital_text(field, value),
+                    # bar：条填充百分比，统一「越满越舒服」。饥饿/口渴/压力/
+                    # 疼痛/心境这些"数值越高越糟"的项会被取反，于是六行
+                    # 条方向一致 —— 短=缺，长=好（2026-11-16 可读性修正）。
+                    "bar": round(feeling_bar_pct(field, value), 1),
+                    # text：与 bar 同向措辞。反向维度用 feeling_word
+                    # 的专用词表（"不饿/不太饿/饿了"），避免出现
+                    # "条很短却写着不饿"这种自相矛盾。
+                    "text": feeling_word(field, value),
                     "tone": _feeling_tone(field, value),
                 })
             return {

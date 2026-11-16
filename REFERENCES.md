@@ -168,3 +168,105 @@ PMID: 24739289
 - 阈值 20 小时：**估算**。文献只给「随睡眠剥夺加剧」的定性结论，
   未给出具体的「第 N 小时必然睡着」的数值。20 小时是保守选择。
 - 强制睡眠持续 6 小时：**估算**，代表一次补偿性长睡。
+
+---
+
+## [R7] Freckmann G, Hagenlocher S, Baumstark A, Jendrike N, Gillen RC, Rössner K, Haug C.
+**Continuous glucose profiles in healthy subjects under everyday life conditions and after different meals.**
+*Journal of Diabetes Science and Technology*. 2007 Sep;1(5):695-703. doi:10.1177/193229680700100513. PMID: 19885137
+
+**查阅方式**：Europe PMC REST 取回题录 + 摘要数值（经文献单元核对）。
+
+**用于**：`body/engine.py` 餐后血糖曲线的定标目标。
+
+**取用内容**：
+- 24 名健康志愿者。日常平均葡萄糖 89.3±6.2 mg/dL（4.96 mmol/L）
+- **餐后峰值时点平均 46–50 min**
+- 早餐峰值 132.3±16.7 mg/dL（7.34 mmol/L，范围 101–168）
+- 高纤维/蛋白/脂肪餐峰值仅 99.2±10.5 与 122.1±20.4 mg/dL，且下降更慢
+
+**支撑的建模选择**：
+- 胃排空半时 90 → 40 min，十二指肠 12 → 6 min，空肠 14 → 8 min
+  （把串联延迟压回生理量级，峰值时点 95-99 min → 63-73 min）
+- 健康餐后峰值目标带 6.0–7.8 mmol/L
+
+**诚实标注**：本模型峰值时点仍未完全达到文献的 46–50 min（当前 63–73 min）。
+剩余差距来自「胃→十二指肠→空肠→肠糖池→血」的五级串联结构本征延迟，
+以及本模型胃排空按体积一阶衰减、而非真实的分相排空（lag phase + 线性相）。
+未进一步压缩是为避免把胃排空调到非生理值。
+
+---
+
+## [R8] Shah VN, DuBose SN, Li Z, Beck RW, Peters AL, Weinstock RS, et al.
+**Continuous Glucose Monitoring Profiles in Healthy Nondiabetic Participants: A Multicenter Prospective Study.**
+*The Journal of Clinical Endocrinology and Metabolism*. 2019 Oct;104(10):4356-4364. doi:10.1210/jc.2018-02763. PMID: 31127824
+
+**查阅方式**：Europe PMC REST 取回题录 + 摘要数值。
+
+**用于**：`body/engine.py` 血糖「是否落在正常区间」的验收标准。
+
+**取用内容**：
+- 12 中心、153 名 7–80 岁健康非糖尿病人，Dexcom G6 盲戴 ≤10 天
+- 平均血糖 98–99 mg/dL（5.4–5.5 mmol/L）
+- **70–140 mg/dL（3.9–7.8 mmol/L）时间占比中位数 96%（IQR 93–98%）**
+- **>140 mg/dL（7.8 mmol/L）中位 2.1%，约 30 min/天**
+
+**支撑的建模选择**：验收线取「餐后 2h < 7.8 mmol/L」与「峰值常态 6.0–7.5」。
+
+---
+
+## [R9] Vlachos D, Malisova S, Lindberg FA, Karaniki G.
+**Glycemic Index (GI) or Glycemic Load (GL) and Dietary Interventions for Optimizing Postprandial Hyperglycemia in Patients with T2 Diabetes: A Review.**
+*Nutrients*. 2020 May;12(6):1561. doi:10.3390/nu12061561. PMID: 32471238
+
+**查阅方式**：Europe PMC REST 取回题录 + 摘要。
+
+**用于**：`body/engine.py` 的 GI/GL 双通道实现。
+
+**取用内容**：
+- 低 GI 食物消化吸收更慢，餐后血糖与胰岛素反应更平缓
+- **GL（血糖负荷）= GI × 碳水克数**，把"质量"与"数量"合并，
+  对餐后反应的解释力优于单用 GI
+- 不要把 GI 同时用来缩放峰值高度与速率（应分离）
+
+**支撑的建模选择**（本模型据此把 GI 拆成两条独立通路）：
+- **速率侧**：GI 分快慢两池，快池入血半时 8 min、慢池 42 min
+- **幅度侧**：`_carb_to_blood_for_gi()` 按加权 GI 折算入血比例
+  （GI 100 → 满额 0.70；GI 30 → 约 0.455），差额按既有逻辑回补肝糖原
+
+---
+
+## [R10] Rizza RA, Mandarino LJ, Gerich JE.
+**Dose-response characteristics for effects of insulin on production and utilization of glucose in man.**
+*American Journal of Physiology*. 1981 Jun;240(6):E630-E639. doi:10.1152/ajpendo.1981.240.6.e630. PMID: 7018254
+
+**查阅方式**：Europe PMC REST 取回题录 + 摘要数值。
+
+**用于**：作为「肝糖输出 vs 外周摄取」相对敏感性的**方向性依据**。
+
+**取用内容**：
+- 15 名健康人，阶梯胰岛素钳夹 + [3-³H]葡萄糖示踪
+- **肝糖输出半最大抑制 29±2 μU/mL，完全抑制约 60 μU/mL**
+- **外周葡萄糖利用半最大需 55±7 μU/mL**（显著高于肝，P<0.01）
+- 基础葡萄糖产生/利用速率 1.93±0.11 / 1.92±0.13 mg·kg⁻¹·min⁻¹
+
+**诚实标注 —— 本模型的当前状态**：
+- 曾试图把这两个 EC50 直接代入 `engine.py` 的 Hill 方程，
+  **实测造成回归**（白米饭峰值 8.11 → 10.87），已回退。
+- 原因：本模型的 `insulin` 字段是 0–1.6 的**相对量纲**，不是 μU/mL，
+  两者不能直接换算代入。要真正落地该文献，须先把胰岛素量纲整体
+  换算到 μU/mL —— 属独立改动，不在本次范围。
+- 文献结论目前**未被代码使用**，仅作为未来改动的依据备查。
+
+---
+
+## 未采用 / 未核实清单（2026-11-16 新增）
+
+完整清单见 `docs/血糖与睡眠文献依据.md` 文末。与本次代码改动直接相关的：
+
+| 事项 | 状态 |
+|---|---|
+| 「连续 4 小时睡眠」作为健康阈值 | **文献中不存在**，纯工程假设（`min_sleep_bout_hours`） |
+| 「午睡 ≤30 min 不影响夜间睡眠」 | **文献不支持**，证据薄弱，未用作依据 |
+| PSQI 回顾窗口 | **PSQI 官方是 1 个月**，本模型的「近 7 日」是类比，**不称 PSQI** |
+| 人类葡萄糖分布容积 14–16 L 的一手测定 | 未找到；[R8 系列之外的 Mari 2011] 数据来自犬 |

@@ -149,7 +149,11 @@
     var box = $('feelings');
     if (!box) return;
     box.innerHTML = (d.feelings || []).map(function (f) {
-      var pct = Math.max(0, Math.min(100, Number(f.value) || 0));
+      // bar 由后端算好（已按方向归一：满=舒服）。
+      // 旧代码直接用 value 当宽度，于是饥饿/口渴的"条长=难受"
+      // 与精力的"条长=精神"方向相反，同一页里长度含义不统一。
+      var pct = Math.max(0, Math.min(100,
+        (f.bar === undefined || f.bar === null) ? (Number(f.value) || 0) : Number(f.bar)));
       return '<div class="lb-feel-row">' +
         '<span>' + f.label + '</span>' +
         '<span class="lb-bar"><i style="width:' + pct + '%;background:' + toneColor(f) + '"></i></span>' +
@@ -178,6 +182,109 @@
       note.textContent = (Number(g.bac) > 0.1 || Number(g.caffeine) > 40)
         ? '嗜好品通路：乙醇按零级消除 0.15 g/L·h，咖啡因半衰期 5 小时。'
         : '';
+    }
+  }
+
+  function renderSleep(d) {
+    var sl = d.sleep || {};
+    var stageZh = { awake: '清醒', light: '浅睡', deep: '深睡', rem: '快速眼动' };
+    // 强制睡眠（微睡眠）单独提示
+    if (sl.forced_sleep) {
+      txt('sl-stage', '强制睡眠中 · 已连续清醒 ' + num(sl.awake_hours, 1) + ' 小时');
+    } else {
+      txt('sl-stage', sl.sleeping
+        ? (stageZh[sl.stage] || sl.stage) + ' · 第 ' + (Number(sl.cycle_index) || 0) + ' 周期'
+        : '清醒中');
+    }
+    txt('sl-cycle', sl.sleeping
+      ? '周期进度 ' + Math.round((Number(sl.cycle_pos) || 0) * 100) + '%'
+      : '—');
+    // 睡眠结构条：四段占比
+    var bar = $('sl-bar');
+    if (bar) {
+      var segs = [
+        ['light', sl.light_pct], ['deep', sl.deep_pct], ['rem', sl.rem_pct]
+      ];
+      var totalPct = segs.reduce(function (a, s) { return a + (Number(s[1]) || 0); }, 0);
+      if (totalPct <= 0) {
+        bar.innerHTML = '<span class="awake" style="width:100%"></span>';
+      } else {
+        bar.innerHTML = segs.map(function (s) {
+          return '<span class="' + s[0] + '" style="width:' + (Number(s[1]) || 0) + '%"></span>';
+        }).join('');
+      }
+    }
+    var hasSleep = (Number(sl.light_h) || 0) + (Number(sl.deep_h) || 0) + (Number(sl.rem_h) || 0) > 0;
+    txt('sl-light', hasSleep ? num(sl.light_h, 1) + 'h' : '—');
+    txt('sl-deep', hasSleep ? num(sl.deep_h, 1) + 'h' : '—');
+    txt('sl-rem', hasSleep ? num(sl.rem_h, 1) + 'h' : '—');
+    var q = Number(sl.quality) || 0;
+    txt('sl-quality', q > 0 ? q + ' 分' : '—');
+    txt('sl-debt', num(sl.debt_h, 1) + ' 小时');
+    // 夜间醒来：总次数 + 分类明细
+    var wc = Number(sl.wake_count) || 0;
+    if (wc > 0) {
+      var wp = [];
+      if (Number(sl.wake_by_message) > 0) wp.push('消息 ' + sl.wake_by_message);
+      if (Number(sl.wake_by_thirst) > 0) wp.push('口渴 ' + sl.wake_by_thirst);
+      if (Number(sl.wake_by_bladder) > 0) wp.push('起夜 ' + sl.wake_by_bladder);
+      var wd = wp.length ? '（' + wp.join(' / ') + '）' : '';
+      txt('sl-wake', wc + ' 次' + wd + (sl.wake_pending ? ' · 等重新入睡' : ''));
+    } else {
+      txt('sl-wake', '无');
+    }
+    var note = $('sl-note');
+    if (note) {
+      if (q <= 0) {
+        note.textContent = '将在第一次睡眠后记录。';
+      } else if (q >= 80) {
+        note.textContent = '睡眠结构良好：深睡与 REM 占比均在健康区间。';
+      } else if (q >= 60) {
+        note.textContent = '睡眠尚可，时长或深睡比例略偏离参考值。';
+      } else {
+        note.textContent = '睡眠质量偏低：深睡不足或有中途清醒，睡眠债难以还清。';
+      }
+    }
+  }
+
+  function renderCycle(d) {
+    // 月经周期关闭时整块隐藏，不留空壳
+    var wrap = $('cycle-card');
+    if (!d.cycle_enabled) {
+      if (wrap) wrap.style.display = 'none';
+      return;
+    }
+    if (wrap) wrap.style.display = '';
+    var cy = d.cycle || {};
+    txt('cy-phase', cy.phase_text || '—');
+    txt('cy-day', num(cy.day, 1) + ' / ' + num(cy.length, 0) + ' 天');
+    txt('cy-uterus', cy.uterus_text || '—');
+    txt('cy-e2', num(cy.estrogen, 2));
+    txt('cy-p4', num(cy.progesterone, 2));
+    var pain = Number(cy.pain) || 0;
+    txt('cy-pain', pain > 0 ? num(pain, 1) + ' / 100' : '无');
+    // 周期环：按当前日占周期比例旋转高亮
+    var ring = $('cy-ring');
+    if (ring) {
+      var ratio = Math.max(0, Math.min(1, (Number(cy.day) || 0) / Math.max(1, Number(cy.length) || 28)));
+      ring.style.background = 'conic-gradient(from -90deg, var(--series-1) 0turn, var(--series-1) ' +
+        ratio + 'turn, var(--lb-soft) ' + ratio + 'turn, var(--lb-soft) 1turn)';
+      ring.innerHTML = '<b>' + Math.round(ratio * 100) + '%</b>';
+    }
+    var note = $('cy-note');
+    if (note) {
+      var base;
+      if (cy.menstruating) {
+        base = '行经期：前列腺素升高引起痛经，疼痛强度按 ES 敏感度调制。';
+      } else if (cy.phase === 'ovulation') {
+        base = '排卵期：雌激素达峰，基础体温在排卵后上移。';
+      } else if (cy.phase === 'luteal') {
+        base = '黄体期：孕激素升高，基础体温处于高位。';
+      } else {
+        base = '卵泡期：雌激素逐步上升，为排卵做准备。';
+      }
+      // 相位依据（按现实日历 / 从启用时刻累加），日期填错时也会在这里说清楚
+      note.textContent = cy.anchor_note ? base + ' ' + cy.anchor_note + '。' : base;
     }
   }
 
@@ -311,6 +418,8 @@
       renderFeelings(STATE.now);
       renderGut(STATE.now);
       renderSpeech(STATE.now);
+    renderSleep(STATE.now);
+    renderCycle(STATE.now);
       renderEvents(STATE.now);
       txt('hdr-version', 'v' + (STATE.now.version || '?'));
       txt('hdr-generated', (STATE.now.generated_at || '').replace('T', ' '));

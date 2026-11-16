@@ -85,7 +85,7 @@
   .lb-linkbar.err .lb-linkbar-dot{background:var(--status-crit)}
   .lb-linkbar-text{flex:1;min-width:0;color:var(--lb-fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .lb-linkbar-meta{font-size:11px;white-space:nowrap}
-  /* ---- 睡眠结构 ---- */
+  /* ---- 睡眠结构（_now_body.html 用） ---- */
   .lb-sleep-bar{display:flex;height:26px;border-radius:6px;overflow:hidden;background:var(--lb-soft);margin-top:8px}
   .lb-sleep-bar span{display:block;height:100%;transition:width .4s ease}
   .lb-sleep-bar span.light{background:var(--series-2)}
@@ -407,7 +407,11 @@
     var box = $('feelings');
     if (!box) return;
     box.innerHTML = (d.feelings || []).map(function (f) {
-      var pct = Math.max(0, Math.min(100, Number(f.value) || 0));
+      // bar 由后端算好（已按方向归一：满=舒服）。
+      // 旧代码直接用 value 当宽度，于是饥饿/口渴的"条长=难受"
+      // 与精力的"条长=精神"方向相反，同一页里长度含义不统一。
+      var pct = Math.max(0, Math.min(100,
+        (f.bar === undefined || f.bar === null) ? (Number(f.value) || 0) : Number(f.bar)));
       return '<div class="lb-feel-row">' +
         '<span>' + f.label + '</span>' +
         '<span class="lb-bar"><i style="width:' + pct + '%;background:' + toneColor(f) + '"></i></span>' +
@@ -671,9 +675,9 @@
       renderVitals(STATE.now);
       renderFeelings(STATE.now);
       renderGut(STATE.now);
-      renderSleep(STATE.now);
-      renderCycle(STATE.now);
       renderSpeech(STATE.now);
+    renderSleep(STATE.now);
+    renderCycle(STATE.now);
       renderEvents(STATE.now);
       txt('hdr-version', 'v' + (STATE.now.version || '?'));
       txt('hdr-generated', (STATE.now.generated_at || '').replace('T', ' '));

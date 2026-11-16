@@ -64,6 +64,36 @@
     </section>
   </div>
 
+  <div class="lb-grid" style="grid-template-columns:1.4fr 1fr;margin-bottom:14px" id="sleep-cycle-grid">
+    <section class="lb-card">
+      <div class="lb-card-hd"><h2>睡眠结构</h2><span class="lb-card-sub" id="sl-stage">—</span></div>
+      <div class="lb-gut-row"><span>当前周期</span><b id="sl-cycle">—</b></div>
+      <div class="lb-sleep-bar" id="sl-bar"></div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px">
+        <div><div class="lb-vital-label">浅睡</div><div class="lb-vital-value" id="sl-light">0<span class="lb-vital-unit">h</span></div></div>
+        <div><div class="lb-vital-label">深睡</div><div class="lb-vital-value" id="sl-deep">0<span class="lb-vital-unit">h</span></div></div>
+        <div><div class="lb-vital-label">快速眼动</div><div class="lb-vital-value" id="sl-rem">0<span class="lb-vital-unit">h</span></div></div>
+      </div>
+      <div class="lb-gut-row" style="margin-top:10px"><span>睡眠质量</span><b id="sl-quality">—</b></div>
+      <div class="lb-gut-row"><span>睡眠债</span><b id="sl-debt">—</b></div>
+      <div class="lb-card-sub" id="sl-note" style="margin-top:8px"></div>
+    </section>
+    <section class="lb-card" id="cycle-card">
+      <div class="lb-card-hd"><h2>月经周期</h2><span class="lb-card-sub" id="cy-phase">—</span></div>
+      <div class="lb-cycle-wrap">
+        <div class="lb-cycle-ring" id="cy-ring"></div>
+        <div class="lb-cycle-info">
+          <div class="lb-gut-row"><span>周期日</span><b id="cy-day">—</b></div>
+          <div class="lb-gut-row"><span>子宫相位</span><b id="cy-uterus">—</b></div>
+          <div class="lb-gut-row"><span>雌激素</span><b id="cy-e2">—</b></div>
+          <div class="lb-gut-row"><span>孕激素</span><b id="cy-p4">—</b></div>
+          <div class="lb-gut-row"><span>疼痛</span><b id="cy-pain">—</b></div>
+        </div>
+      </div>
+      <div class="lb-card-sub" id="cy-note" style="margin-top:8px"></div>
+    </section>
+  </div>
+
   <div class="lb-grid" style="grid-template-columns:1.4fr 1fr;margin-bottom:14px" id="mid-grid">
     <section class="lb-card">
       <div class="lb-card-hd"><h2>她自己会怎么说</h2><span class="lb-card-sub">由引擎直接生成的中文自述</span></div>
