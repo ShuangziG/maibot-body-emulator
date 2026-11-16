@@ -50,6 +50,28 @@ PLUGIN_VERSION = "1.2.3"
 H2S = 3600.0
 SAVE_FILE = "body_state.json"
 
+
+def _feeding_enabled_in_config() -> bool:
+    """import 期读一次 config.toml，决定 body_eat 要不要进常驻工具表。
+
+    [feeding] enabled=false 时不带 visibility（宿主按 deferred 处理，
+    不进模型常驻工具表，tool_search 仍可搜到，调用时 handler 会正常
+    回复未开启），省掉每次请求固定的工具定义开销；任何读取失败都按
+    开启处理，与旧行为一致。宿主重载插件会重新 import，改完配置
+    重载即生效。
+    """
+    try:
+        import tomllib
+
+        cfg_path = Path(__file__).resolve().parent / "config.toml"
+        with open(cfg_path, "rb") as fh:
+            return bool(tomllib.load(fh).get("feeding", {}).get("enabled", True))
+    except Exception:
+        return True
+
+
+_EAT_TOOL_VIS = {"visibility": "visible"} if _feeding_enabled_in_config() else {}
+
 # 生理波形缓冲区的「超前起点」（秒）。
 # 前端 webui/organs.html 用 WAVE_WINDOW_SEC=8 的窗口显示波形，屏幕右缘是
 # 「现在」。所以后端生成的样本必须从「现在-8s」开始，前端才能按绝对时间
@@ -2183,8 +2205,9 @@ class LifeBodyPlugin(MaiBotPlugin):
                               description="这次吃喝的由来，如「用户点的外卖」",
                               required=False, default=""),
         ],
-        # 常驻可见：见 handle_body_state 上方同一条注释。
-        visibility="visible",
+        # feeding 关闭时不进常驻工具表（见文件顶部 _feeding_enabled_in_config）；
+        # 开启时照旧常驻，见 handle_body_state 上方同一条注释。
+        **_EAT_TOOL_VIS,
     )
     async def handle_body_eat(self, kind: str = "snack", items: str = "",
                               note: str = "", **kwargs: Any) -> dict[str, Any]:
