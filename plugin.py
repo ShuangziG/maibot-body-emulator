@@ -46,7 +46,7 @@ from .body.translate import FEELING_LEVELS, drunk_level, eat_phase, phase
 from .config import LifeBodyConfig
 from .link import LifeLink
 
-PLUGIN_VERSION = "1.2.1"
+PLUGIN_VERSION = "1.2.2"
 H2S = 3600.0
 SAVE_FILE = "body_state.json"
 
@@ -772,7 +772,9 @@ class LifeBodyPlugin(MaiBotPlugin):
         # 室内外判断要用当前场景地点
         loc = str(getattr(link, "_location_hint", "") or "")
         try:
-            scene = await link._call("get_current_scene")
+            # 走 provider 感知的取场景：麦生活仍是 get_current_scene，
+            # 麦织改由 get_life_status 取（它没有 get_current_scene）
+            scene = await link.current_scene()
             cur = (scene or {}).get("current") or {}
             loc = str(cur.get("location") or "") or loc
             link._location_hint = loc
@@ -854,7 +856,9 @@ class LifeBodyPlugin(MaiBotPlugin):
         if ex_cfg is not None and bool(getattr(ex_cfg, "enabled", True)):
             if not engine.s.exercise_intent:
                 try:
-                    scene = await link._call("get_current_scene")
+                    # 同上：麦织没有 get_current_scene，旧写法在麦织下必然抛异常
+                    # 并被下面的 except 静默吞掉，导致"日程写了跑步身体不跑"。
+                    scene = await link.current_scene()
                     cur = (scene or {}).get("current") or {}
                     summary = str(cur.get("summary") or "")
                     kind = str(cur.get("kind") or "")

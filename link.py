@@ -309,6 +309,44 @@ class LifeLink:
         return slot, key, summary, items
 
     # ------------------------------------------------------------------
+    async def current_scene(self) -> dict[str, Any]:
+        """取"当前场景"，供运动识别与天气地点使用。
+
+        两个日程插件的 API 不同名：
+          - 麦生活：get_current_scene，返回 {"current": {kind, summary, location}}
+          - 麦织：  没有 get_current_scene，只有 get_life_status，
+                    当前安排放在 status["current"]，文本字段叫 title 不叫 summary
+
+        旧实现两处调用点都硬编码 get_current_scene，切到麦织后必然抛异常
+        并被静默吞掉 —— 结果是"日程里写了跑步，身体不会去跑"，且无任何日志。
+        这里按 provider 分派，麦生活分支保持原样，只补麦织分支。
+
+        返回统一形状 {"current": {"kind", "summary", "location"}}，
+        拿不到时返回空 dict，调用方按"没有场景信息"降级。
+        """
+
+        if self._provider() != "weave":
+            # 麦生活：原样调用，行为与改动前完全一致
+            return await self._call("get_current_scene") or {}
+
+        status = await self._call("get_life_status")
+        if not isinstance(status, dict) or not status:
+            return {}
+        if not status.get("ready") or not status.get("enabled"):
+            return {}
+        current = status.get("current") or {}
+        if not current:
+            return {}
+        # 麦织的文本字段是 title；location 可能在 current 里，也可能在顶层
+        return {
+            "current": {
+                "kind": str(current.get("kind") or ""),
+                "summary": str(current.get("title") or ""),
+                "location": str(current.get("location") or status.get("location") or ""),
+            }
+        }
+
+    # ------------------------------------------------------------------
     async def _meal_trigger_weave(self, hour: float) -> tuple[str, str, str, list]:
         """麦织版的三餐触发：结构对齐 meal_trigger，去重键用 plan id + start。
 

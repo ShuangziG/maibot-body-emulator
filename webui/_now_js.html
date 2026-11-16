@@ -294,7 +294,19 @@
     txt('brief', sp.brief || '—');
   }
 
-  var KIND_LABEL = { meal: '进食', drink: '饮水', urination: '排尿', stool: '排便', sleep_start: '入睡', sleep_end: '醒来', alert: '告警', sleep: '睡眠' };
+  // 事件 kind -> 中文标签。必须覆盖 body/engine.py 里 Event() 实际发出的
+  // 全部 20 种 kind，缺一个就会在界面上露出英文原值（如 sleep_stage）。
+  // 与 webui/_timeline_js.html 的 KIND_LABEL 保持同一套用词。
+  var KIND_LABEL = {
+    meal: '进食', drink: '饮水', urination: '排尿', stool: '排便',
+    sleep_start: '入睡', sleep_end: '醒来', sleep_stage: '睡眠分期',
+    wake: '夜间唤醒', forced_sleep: '强制入睡', forced_sleep_end: '补觉醒来',
+    forced_wake: '强制唤醒', nap_end: '小睡结束',
+    exercise_start: '开始运动', exercise_end: '结束运动',
+    exercise_rep: '运动分段', doms: '肌肉酸痛',
+    menstrual_cycle: '月经周期',
+    alert: '告警', critical: '危重', hospital: '送医'
+  };
 
   function renderEvents(d) {
     var ul = $('events');
@@ -320,6 +332,26 @@
 
   var FONT = '11px system-ui, -apple-system, "Segoe UI", "Microsoft YaHei UI", sans-serif';
 
+  // 把一组系列换算成可视刻度区间。空数据返回 null。
+  function chartSpan(list, zeroBase) {
+    var vals = [];
+    list.forEach(function (s) {
+      (s.data || []).forEach(function (v) { if (isFinite(v)) vals.push(v); });
+    });
+    if (!vals.length) return null;
+    var min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
+    if (zeroBase) min = Math.min(0, min);
+    if (max - min < 1e-6) { max = min + 1; }
+    var pad = (max - min) * 0.12;
+    // 非负量（体积、浓度）留白后可能出现负刻度，如胃容量 0 -> -100，须钳回 0
+    var lo = min - pad;
+    if (min >= 0.0) lo = Math.max(0, lo);
+    return { min: lo, max: max + pad };
+  }
+
+  // series 里带 axis:'right' 的走右轴，其余共用左轴。
+  // 血糖(mmol/L) 与体温(℃) 这类量纲差一个数量级的必须分轴：同轴时血糖
+  // 约 1.6 的波动会被体温 37 的绝对值压成一条直线（实测 5px/103px）。
   function drawChart(canvas, series, opts) {
     if (!canvas || !series.length) return;
     var ctx = canvas.getContext('2d');
@@ -336,17 +368,21 @@
     var grid = css.getPropertyValue('--chart-grid').trim() || 'rgba(120,120,120,.18)';
     var axis = css.getPropertyValue('--chart-axis').trim() || 'rgba(120,120,120,.45)';
 
-    var padL = 34, padR = 8, padT = 8, padB = 18;
-    var iw = w - padL - padR, ih = h - padT - padB;
+    var zeroBase = !!(opts && opts.zeroBase);
+    var leftSeries = series.filter(function (s) { return s.axis !== 'right'; });
+    var rightSeries = series.filter(function (s) { return s.axis === 'right'; });
+    // 全部系列都在右轴时，仍要有主轴可用
+    if (!leftSeries.length) { leftSeries = rightSeries; rightSeries = []; }
+    var L = chartSpan(leftSeries, zeroBase);
+    if (!L) return;
+    var R = rightSeries.length ? chartSpan(rightSeries, false) : null;
 
-    var all = [];
-    series.forEach(function (s) { s.data.forEach(function (v) { if (isFinite(v)) all.push(v); }); });
-    if (!all.length) return;
-    var min = Math.min.apply(null, all), max = Math.max.apply(null, all);
-    if (opts && opts.zeroBase) min = Math.min(0, min);
-    if (max - min < 1e-6) { max = min + 1; }
-    var pad = (max - min) * 0.12;
-    min -= pad; max += pad;
+    var leftTick = (opts && opts.tick === 2) ? 1 : 0;
+    var rightTick = (opts && opts.tickRight !== undefined)
+      ? opts.tickRight : leftTick;
+
+    var padL = 34, padR = R ? 40 : 8, padT = 8, padB = 18;
+    var iw = w - padL - padR, ih = h - padT - padB;
 
     ctx.strokeStyle = grid;
     ctx.lineWidth = 1;
@@ -355,22 +391,29 @@
     for (var i = 0; i <= 3; i++) {
       var y = padT + ih * i / 3;
       ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + iw, y); ctx.stroke();
-      var val = max - (max - min) * i / 3;
-      ctx.fillText(val.toFixed(opts && opts.tick === 2 ? 1 : 0), 2, y + 3.5);
+      ctx.textAlign = 'left';
+      ctx.fillText((L.max - (L.max - L.min) * i / 3).toFixed(leftTick), 2, y + 3.5);
+      if (R) {
+        ctx.textAlign = 'right';
+        ctx.fillText((R.max - (R.max - R.min) * i / 3).toFixed(rightTick), w - 2, y + 3.5);
+      }
     }
+    ctx.textAlign = 'left';
 
     series.forEach(function (s) {
+      var ax = (s.axis === 'right' && R) ? R : L;
+      var data = s.data || [];
       ctx.strokeStyle = s.color;
       ctx.lineWidth = 1.8;
       ctx.lineJoin = 'round';
       ctx.beginPath();
-      var n = s.data.length;
+      var n = data.length;
       var started = false;
       for (var k = 0; k < n; k++) {
-        var v = s.data[k];
+        var v = data[k];
         if (!isFinite(v)) { started = false; continue; }
         var px = padL + (n <= 1 ? iw / 2 : iw * k / (n - 1));
-        var py = padT + ih - ih * (v - min) / (max - min);
+        var py = padT + ih - ih * (v - ax.min) / (ax.max - ax.min);
         if (!started) { ctx.moveTo(px, py); started = true; } else { ctx.lineTo(px, py); }
       }
       ctx.stroke();
@@ -401,10 +444,11 @@
       { data: s.sbp || [], color: '#eb6834' },
       { data: s.dbp || [], color: '#1baf7a' }
     ], { labels: labels, tick: 0 });
+    // 血糖走左轴、体温走右轴：两者量纲差约 7 倍，同轴会把血糖压平
     drawChart($('chart-meta'), [
       { data: s.glucose || [], color: '#eda100' },
-      { data: s.temp || [], color: '#6250d6' }
-    ], { labels: labels, tick: 2 });
+      { data: s.temp || [], color: '#6250d6', axis: 'right' }
+    ], { labels: labels, tick: 2, tickRight: 1 });
   }
 
   async function loadNow() {

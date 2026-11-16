@@ -270,3 +270,107 @@ PMID: 24739289
 | 「午睡 ≤30 min 不影响夜间睡眠」 | **文献不支持**，证据薄弱，未用作依据 |
 | PSQI 回顾窗口 | **PSQI 官方是 1 个月**，本模型的「近 7 日」是类比，**不称 PSQI** |
 | 人类葡萄糖分布容积 14–16 L 的一手测定 | 未找到；[R8 系列之外的 Mari 2011] 数据来自犬 |
+
+---
+
+## [R11] Nicolò A, Girardi M, Bazzucchi I, Felici F, Sacchetti M.
+
+**题录**：Respiratory frequency and tidal volume during exercise: differential control and unbalanced interdependence. *Physiol Rep*. 2018;6(21):e13908. doi:10.14814/phy2.13908. PMID 30393984. PMCID PMC6215760.
+
+**查阅方式**：PMC 全文（开放获取）。
+
+**用于**：确定运动通气的执行器官是**潮气量（VT）而非呼吸频率（fR）**，据此重写 engine.py 的 _respiratory()。
+
+**取用内容**：
+- fR 与 VT 由不同输入调控、时序不同，二者是「非平衡的相互依赖」。
+- 中等强度运动、代谢性刺激占主导时，是 **VT 承担分钟通气的增加**。
+- **单独提高 fR 会增加死腔通气并导致 CO₂ 潴留；提高 VT 不会** —— 因为解剖死腔按每次呼吸固定扣减（本模型 150 mL）。
+
+**落地结果**：被控量改为肺泡通气量 VA，由它反解 tidal：`tidal = VA*1000/rr + 150`。
+原实现只给 rr 加 8（固定 tidal=500），死腔占比恒为 0.30，实测运动 pCO₂ 冲到 59、误报呼吸性酸中毒。
+
+---
+
+## [R12] Whipp BJ, Davis JA, Wasserman K.
+
+**题录**：Ventilatory control of the isocapnic buffering region in rapidly-incremental exercise. *Respir Physiol*. 1989;76(3):357-367. doi:10.1016/0034-5687(89)90076-5. PMID 2501844.
+
+**查阅方式**：PubMed 题录 + 摘要。
+
+**用于**：解释「酸在增加但 PaCO₂ 不降」的反直觉现象，避免把运动中的 CO₂ 升高误判为呼吸性酸中毒。
+
+**取用内容**：
+- 递增负荷运动中，超过无氧阈后的一段范围内 **PaCO₂ 并不下降**，称「等碳酸缓冲段」（isocapnic buffering）。
+- 原因是乳酸被 HCO₃⁻ 缓冲时**额外产生 CO₂**，同步增加的通气把它排掉，故 PaCO₂ 维持。
+- 该现象不是「静态的 PCO₂ 不变」，而是对代谢性酸中毒的通气反应。
+
+**落地结果**：_acidbase() 中乳酸只消耗 HCO₃⁻，**不重复计入 CO₂** —— 缓冲产生的 CO₂ 已由通气项排出，避免同一份酸被记两次。
+
+---
+
+## [R13] Stickland MK, Lindinger MI, Olfert IM, Heigenhauser GJF, Hopkins SR.
+
+**题录**：Pulmonary Gas Exchange and Acid-Base Balance During Exercise. *Compr Physiol*. 2013;3(2):693-739. doi:10.1002/cphy.c110048. PMID 23720327. PMCID PMC8315793.
+
+**查阅方式**：PMC 全文（作者稿）。
+
+**用于**：确认运动时 PaCO₂ 的正常范围，以及运动性酸中毒的性质（代谢性为主）。
+
+**取用内容**：
+- 多数受试者在递增负荷试验中，**直到接近 V̇O₂max 前，PaCO₂ 都维持在静息值几个 mmHg 以内**。
+- 运动通气的驱动是多来源的：中枢指令、III/IV 类肌肉传入、外周/中枢化学感受器 —— **不是「运动时把频率调高」这种单一开环项**。
+
+**落地结果**：
+- 运动中 pco2_set 取 38.5 mmHg（轻度过度通气），不再让 pCO₂ 冲到 59。
+- 运动性酸中毒改由乳酸降低碱剩余的通路产生；配合 [R14] 的 Van Slyke 方程后，重运动 pH 落在 7.32~7.40（真实 7.30~7.35）。
+
+---
+
+## [R14] Siggaard-Andersen O.
+
+**题录**：The van Slyke equation. *Scand J Clin Lab Invest Suppl*. 1977;146:15-20. doi:10.3109/00365517709098927. PMID 13478.
+
+**查阅方式**：PubMed 题录（原文为付费期刊，未取全文）；方程形式核对自临床血气仪通用算法与多份教材式表述。
+
+**用于**：建立「碱剩余 BE ↔ pH ↔ HCO₃⁻」三者之间的换算关系，是 `_acidbase()` 的核心方程。
+
+**取用内容**：
+- 标准碱剩余（SBE）方程：`BE = (1 − 0.023×Hb) × ((HCO₃⁻ − 24.4) + (2.3×Hb + 7.7) × (pH − 7.40))`
+- 取 Hb = 5 g/dL 即为「标准碱剩余」口径——该口径把血浆与红细胞之间的缓冲分摊折算为细胞外液等效值，是临床血气仪的通用做法。
+- 碱剩余的意义：把所有缓冲对吸收完酸之后「还剩多少碱」压缩成一个标量，由此反解 pH 时，**非碳酸氢盐缓冲被自动计入**。
+
+**落地结果**：`_acidbase()` 不再由 HCO₃⁻ 直接套 Henderson-Hasselbalch，而是：
+1) 乳酸负荷 → 碱剩余下降（1 mmol/L = 1 mEq/L）；
+2) 由 BE 与 pCO₂ 用二分法反解 pH（24 次迭代，精度约 8e-8）；
+3) 再由 pH 与 pCO₂ 反算 HCO₃⁻，保证三者自洽。
+
+---
+
+## [R15] Krbec M, Waldauf P, Zadek F, Brusatori S, Zanella A, Duška F, Langer T.
+
+**题录**：Non-carbonic buffer power of whole blood is increased in experimental metabolic acidosis: an *in-vitro* study. *Front Physiol*. 2022;13:1009378. doi:10.3389/fphys.2022.1009378.
+
+**查阅方式**：Frontiers 开放获取全文。
+
+**用于**：确认「血液缓冲不止碳酸氢盐」这一前提，为非碳酸氢盐缓冲项提供依据。
+
+**取用内容**：
+- 人血中有两类缓冲限制 pH 波动：**碳酸氢盐缓冲系统**与**非碳酸（non-carbonic）缓冲**。
+- 非碳酸缓冲由血浆蛋白、磷酸盐，以及**最重要的红细胞内血红蛋白**构成（引 Van Slyke 1922 原始工作）。
+- 只有非碳酸缓冲能限制**呼吸性**紊乱引起的 pH 变化；代谢性酸中毒时碳酸氢盐被消耗，而非碳酸缓冲的浓度保持。
+- 该研究实测 βNC 随强离子差下降而升高（每降 1 mEq/L 升 0.36 mmol/L），说明缓冲能力并非常数。
+
+**落地结果**：模型中 HCO₃⁻ 不再是唯一的缓冲承担者；非碳酸氢盐缓冲经 [R14] 的碱剩余项折算。**未**实现 βNC 随酸中毒上升的动态效应（本模型取常数），属已知简化。
+
+---
+
+## 酸碱部分的「估算」标注（2026-11-16 新增）
+
+| 事项 | 状态 |
+|---|---|
+| 乳酸 : 碱剩余 1 : 1 | **教科书结论（Stewart 强离子差框架），未找到一手测定文献**，按估算处理（engine.py 内已标注） |
+| 非碳酸氢盐缓冲当量 `_M_HB = 40.0` | **经验标定值**。标准 SBE 口径（Hb 5 g/dL）为 19.2，只覆盖细胞外液；体内约 60% 缓冲在细胞内，故上调。标定目标：乳酸 10 → pH≈7.29（实测 7.30） |
+| 细胞内缓冲占约 60% | 引自 Deranged Physiology（教学网站，二手转述 Van Slyke 原始工作），**未核对一手测定** |
+| 肾脏代偿系数「pCO₂ 每高 10 mmHg，HCO₃⁻ 升 3.5」 | 教科数量级，未逐条核对原始研究 |
+| 运动时 pco2_set = 38.5 mmHg | 由 [R13] 的「维持静息值几个 mmHg 以内」取定，非精确测定值 |
+| 告警阈值（运动中 7.10 / 恢复期 7.20 / 静息 7.30） | **工程取值，非文献阈值**。真实重运动 pH 可低至 7.1~7.2，故运动中放宽；静息沿用 7.30 |

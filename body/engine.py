@@ -1679,6 +1679,52 @@ class BodyEngine:
             rr_t += 8.0
         s.rr = approach(s.rr, clamp(rr_t, 6.0, 40.0), dt, "rr")
 
+        # ---- 肺泡通气量 -> 潮气量（2026-11-16）----
+        # 旧实现 tidal 恒为 500（BodyState 里的常量，全引擎无人调节）：运动时
+        # VCO2 从 0.255 涨到 0.605（+137%），而通气只靠 rr 涨 57%，补偿严重不足
+        # —— 实测 pCO2 冲到 59、pH 跌到 7.235，误报「酸中毒」。
+        #
+        # 被控量必须是**肺泡通气量 VA**，不是总分钟通气量 vent。
+        # 曾误用 vent：固定 vent 后 VA = vent - 0.15*rr 会随 rr 升高而下降，
+        # 与生理方向相反，并通过 rr 的 pCO2 反馈形成正反馈。A/B 实测（应激 100）：
+        #   基线  VA 7.00 / pCO2 31.4     误用版  VA 4.55 / pCO2 48.4
+        # 方向完全颠倒，故改为直接控制 VA。
+        #
+        # 目标 pCO2 定法：
+        #   - 静息 40
+        #   - 运动 38.5（真实运动存在轻度过度通气，pCO2 略低于静息）
+        #   - 应激时按 40 - 0.09*stress 下降：焦虑紧张会换气过度 → 呼吸性碱中毒。
+        #     该系数由基线行为标定（基线 stress=100 时 pCO2 约 31），不是新发明。
+        # 反解：VA = 863*VCO2/pCO2，再由 VA 反解 tidal = VA*1000/rr + 150
+        # （+150 补回解剖死腔）。于是 rr 变化时 tidal 自动补偿，VA 始终保持在
+        # 目标值 —— pCO2 不再因 rr 波动漂移；运动相位切换时 VCO2 阶跃、tidal
+        # 同步阶跃，VA 瞬时到位，不会出现「VCO2 已降而 VA 未降」的碱中毒过冲。
+        stress = max(0.0, float(getattr(s, "stress", 0.0) or 0.0))
+        vco2_t = 0.255 + (0.35 if s.exercising else 0.0)
+        vco2_t += max(0.0, s.temp - 37.0) * 0.06
+        if s.exercising:
+            pco2_set = 38.5
+        else:
+            # 静息目标必须复现基线的平衡解，而不是拍一条直线。
+            # 基线里 stress 只经 rr 影响通气：
+            #   rr = 14 + 0.06*stress + 0.16*max(0, pCO2-40)
+            #   VA = 0.35*rr          （tidal 恒 500 时的等价式）
+            #   pCO2 = 220.1/VA
+            # 解这个自洽方程即得基线平衡 pCO2（stress=0 时 43.3、28 时 40.1、
+            # 100 时 31.4），与实测逐点吻合。用线性近似会在中低应激段偏低
+            # —— 曾用 40-0.09*stress，实测静息 pCO2 从 40.05 掉到 37.46。
+            _rr0 = 14.0 + 0.06 * stress
+            _p_hyper = 628.9 / max(_rr0, 1.0)      # 220.1/(0.35*rr)
+            if _p_hyper > 40.0:
+                # 代回 max(0, pCO2-40) 项后的二次方程正根
+                _b = 7.6 + 0.06 * stress
+                pco2_set = (-_b + math.sqrt(_b * _b + 402.5)) / 0.32
+            else:
+                pco2_set = _p_hyper
+            pco2_set = clamp(pco2_set, 25.0, 45.0)
+        va_t = clamp(863.0 * vco2_t / max(pco2_set, 20.0), 2.0, 60.0)
+        s.tidal = clamp(va_t * 1000.0 / max(s.rr, 1.0) + 150.0, 350.0, 2200.0)
+
         vent = s.rr * s.tidal / 1000.0
         o2_t = clamp(0.90 + 0.10 * (vent / 7.0) - 0.5 * max(0.0, s.blood_vol / 5000.0 - 1.0), 0.60, 0.995)
         # dt 大于 TAU["o2"] 时一阶惯性会过冲（实测 dt=10 得到 107%），必须钳位
@@ -1701,18 +1747,94 @@ class BodyEngine:
     # ------------------------------------------------------------------
     # 酸碱平衡：pH 由碳酸氢根与 pCO2 共同决定
     # ------------------------------------------------------------------
+    # ---- 酸碱模型常数（Van Slyke 方程，Siggaard-Andersen 1977）----
+    # 标准碱剩余用「血红蛋白 5 g/dL」的细胞外液口径：该口径把血浆与红细胞
+    # 之间的缓冲分摊折算成细胞外液的等效值，是临床血气仪的通用做法。
+    #   SBE = (1 - 0.023*Hb) * ((HCO3 - 24.4) + (2.3*Hb + 7.7)*(pH - 7.4))
+    _STD_HB = 5.0
+    _K_HB = 1.0 - 0.023 * _STD_HB          # 0.885
+    # 非碳酸氢盐缓冲当量 m（mmol/L per pH）：
+    #   标准 SBE 取 Hb=5 g/dL -> m = 2.3*5 + 7.7 = 19.2，口径只覆盖
+    #   细胞外液（血浆 + 红细胞），比体内实际缓冲弱。
+    #   真实人体约 60% 的缓冲发生在细胞内（蛋白、肽、磷酸盐），
+    #   这部分不体现在标准 SBE 里。本模型取 in-vivo 有效值 40.0，
+    #   使运动性酸中毒幅度与实测吻合：
+    #     乳酸 7.7（本模型运动峰值）-> pH 7.33（实测重运动 7.30~7.35）
+    #     乳酸 10                    -> pH 7.29（实测 7.30）
+    #   该值属**经验标定**，非文献直接给出的常数，见 REFERENCES.md [R14]。
+    _M_HB = 40.0
+    _CO2_SOL = 0.0307                       # CO2 溶解度 mmol/L/mmHg
+    _BE_HCO3 = 24.4                         # Van Slyke 方程的参考碳酸氢根
+
+    def _solve_ph_from_be(self, be: float, paco2: float) -> float:
+        """由碱剩余与 pCO2 反解 pH（Van Slyke 方程，二分法）。
+
+        为什么不直接 HCO3 -> pH：碳酸氢盐只是缓冲体系的一部分。
+        血红蛋白（全血约 30% 缓冲容量）、血浆蛋白、磷酸盐都会吸收 H+，
+        使同样一份酸负荷下 HCO3- 少掉一部分、pH 少掉一部分。
+        只按 HCO3 算 pH 会把酸中毒放大近一倍 —— 实测乳酸 15 时模型给
+        pH 7.019，真实血液约 7.25（见 REFERENCES.md [R14]）。
+        碱剩余把「所有缓冲对吸收完酸之后还剩多少碱」压缩成一个标量，
+        再用它反解 pH，非碳酸氢盐缓冲就自动被计入了。
+        """
+
+        a = self._CO2_SOL * max(paco2, 5.0)
+        k, m = self._K_HB, self._M_HB
+
+        def f(ph: float) -> float:
+            hco3 = a * (10.0 ** (ph - 6.1))
+            return k * ((hco3 - self._BE_HCO3) + m * (ph - 7.4)) - be
+
+        lo, hi = 6.50, 7.85
+        flo, fhi = f(lo), f(hi)
+        # 极端值落在外，直接钳到边界，保证不抛异常
+        if flo > 0.0:
+            return lo
+        if fhi < 0.0:
+            return hi
+        for _ in range(24):          # 24 次二分 -> 区间 1.35 上精度约 8e-8
+            mid = 0.5 * (lo + hi)
+            if f(mid) > 0.0:
+                hi = mid
+            else:
+                lo = mid
+        return 0.5 * (lo + hi)
+
     def _acidbase(self, dt):
+        """酸碱平衡：碱剩余（代谢分量） + pCO2（呼吸分量） -> pH。
+
+        2026-11-16 重写。三处关键改动：
+          1. 补上代谢性酸中毒（乳酸），此前 pH 只受 pCO2 影响；
+          2. 改用 Van Slyke 方程反解 pH，**非碳酸氢盐缓冲对（血红蛋白、
+             血浆蛋白、磷酸盐）被自动计入**，不再让 HCO3 独自承担全部酸；
+          3. HCO3 由 pH 反算，不再作为独立状态量平滑 —— 它本就是
+             pH 与 pCO2 的派生量，独立平滑会与 pH 自相矛盾。
+        """
+
         s = self.s
-        # 肾脏对慢性高碳酸血症的代偿：pCO2 每高于 40 mmHg 10，HCO3- 升 3.5 mmol/L。
-        # 时间常数取 6 小时（真实肾脏代偿需数小时到数天，这里取快端以免长期偏酸）。
+
+        # ---- 1) 肾脏代偿（慢，小时级）----
+        # pCO2 每高于 40 mmHg 10，HCO3- 升 3.5 mmol/L。真实肾脏代偿需
+        # 数小时到数天，这里取 6 h（快端，避免长期偏酸）。
+        # 肾代偿是「获得碱」，在碱剩余上体现为正值。
         chronic = max(0.0, s.paco2 - 40.0)
-        hco3_t = 24.0 + chronic / 10.0 * 3.5
-        # 急性呼吸性酸中毒时 HCO3 尚未代偿；用 6 h 的一阶惯性表现这个滞后
-        s.hco3 = approach_tau(s.hco3, hco3_t, dt, 6.0 * H2S)
-        # Henderson-Hasselbalch：pH = 6.1 + log10(HCO3 / (0.03 × pCO2))
-        denom = max(0.03 * max(s.paco2, 5.0), 1e-6)
+        comp_t = chronic / 10.0 * 3.5
+        s.hco3_renal = approach_tau(s.hco3_renal, comp_t, dt, 6.0 * H2S)
+
+        # ---- 2) 代谢分量：乳酸带走碱剩余 ----
+        # 乳酸是强离子酸，每 1 mmol/L 使强离子差 SID 降 1 mEq/L，
+        # 等价于碱剩余降 1 mmol/L。静息基线 1.0，只对超出部分计账。
+        # 缓冲产生的额外 CO2 由通气排出（等碳酸缓冲段），不重复计入。
+        acid_load = max(0.0, s.lactate - 1.0)
+        be = s.hco3_renal - acid_load
+
+        # ---- 3) 由碱剩余 + pCO2 反解 pH ----
         # 生理可达范围：碱中毒上限约 7.65（极端），酸中毒下限约 6.80
-        s.ph = clamp(6.1 + math.log10(max(s.hco3, 1.0) / denom), 6.80, 7.65)
+        s.ph = clamp(self._solve_ph_from_be(be, s.paco2), 6.80, 7.65)
+
+        # ---- 4) HCO3 由 pH 与 pCO2 反算（保持自洽）----
+        s.hco3 = clamp(self._CO2_SOL * max(s.paco2, 5.0) * (10.0 ** (s.ph - 6.1)),
+                       2.0, 55.0)
 
     # ------------------------------------------------------------------
     # 代谢：血糖 / 糖原 / ATP / 乳酸 / 酮体
@@ -2983,8 +3105,23 @@ class BodyEngine:
         fire("hypoxia", s.sao2 < 92.0, "alert", f"血氧低 {s.sao2:.0f}%")
         fire("fever", s.temp > 38.5, "warn", f"发热 {s.temp:.1f} ℃")
         fire("dehydrate", s.osmol > 305.0, "warn", f"脱水 渗透压 {s.osmol:.0f}")
-        # 酸碱：pH 与 pCO2/hco3 现在自洽，极端值可以报警了
-        fire("acidosis", s.ph < 7.30, "warn", f"酸中毒 pH {s.ph:.2f} pCO2 {s.paco2:.0f}")
+        # 酸碱：阈值必须随运动状态变化，不能用一个绝对数。
+        # 真实重运动时 pH 会生理性降到 7.1~7.2（乳酸被 HCO3- 缓冲），
+        # 这是正常代偿而非病理；运动后乳酸需 30~60 分钟清除，恢复期同理。
+        # 用一个固定 7.30 会把每一次正常运动都报成「酸中毒」。
+        #   - 运动中    ：只报真正危险的重度酸中毒（< 7.10）
+        #   - 运动后 30 min 内：乳酸尚未清除，放到 7.20
+        #   - 静息      ：常规阈值 7.30
+        _last_ex = float(getattr(s, "last_exercise_t", 0.0) or 0.0)
+        _recent_ex = _last_ex > 0.0 and (s.t - _last_ex) < 1800.0
+        if s.exercising:
+            acid_th = 7.10
+        elif _recent_ex:
+            acid_th = 7.20
+        else:
+            acid_th = 7.30
+        fire("acidosis", s.ph < acid_th, "warn",
+             f"酸中毒 pH {s.ph:.2f} pCO2 {s.paco2:.0f} 乳酸 {s.lactate:.1f}")
         fire("alkalosis", s.ph > 7.48, "warn", f"碱中毒 pH {s.ph:.2f} pCO2 {s.paco2:.0f}")
         # 排便：超过 3 天不排便算便秘（真人 3 次/天到 3 次/周都正常）
         days_since = (s.t - s.last_stool_t) / 86400.0

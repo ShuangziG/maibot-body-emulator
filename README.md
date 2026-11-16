@@ -271,6 +271,7 @@ interval_seconds = 60.0   # 拉取间隔，不建议低于 30
 | 生理逻辑 | 完全自行实现，非反编译、非移植。血压、血糖、肾滤过、激素反馈的方程依据公开生理学常识与量纲关系构建，参数以结果落进生理范围为准。 |
 | 食物数据 | 311 种食物（23 项 APK 原生 FoodType + 288 项中式日常扩展）的份量、热量、三大营养素按 USDA FoodData Central 与《中国食物成分表（第 6 版）》的常见份量估算填写，**不取自 LIFE 的原始数值表**。扩展表的热量由 `4×碳水 + 4×蛋白 + 9×脂肪 + 7×酒精` 反推，避免营养素与热量自相矛盾。 |
 | 天气数据 | Open-Meteo 公开接口（实时温度、相对湿度、风速），城市名自动地理编码。 |
+| 酸碱平衡 | 呼吸性分量由 Henderson-Hasselbalch 方程给出（HCO₃⁻ 与 pCO₂ 共同决定 pH）；代谢性分量按乳酸消耗 HCO₃⁻ 建模。运动通气的**被控量是肺泡通气量**，由它反解潮气量——单独提高呼吸频率只会增加死腔通气，见 [R11]。 |
 | 已知偏差 | 见第十一节。 |
 
 ### 参考文献
@@ -289,6 +290,9 @@ interval_seconds = 60.0   # 拉取间隔，不建议低于 30
 | [R8] | Shah VN, et al. Continuous Glucose Monitoring Profiles in Healthy Nondiabetic Participants. *J Clin Endocrinol Metab*. 2019;104(10):4356-4364. PMID 31127824 | 健康人血糖正常区间 |
 | [R9] | Vlachos D, et al. Glycemic Index (GI) or Glycemic Load (GL) and Dietary Interventions. *Nutrients*. 2020;12(6):1561. PMID 32471238 | GI 决定速率、GL 决定幅度 |
 | [R10] | Rizza RA, Mandarino LJ, Gerich JE. Dose-response characteristics for effects of insulin on production and utilization of glucose in man. *Am J Physiol*. 1981;240(6):E630-E639. PMID 7018254 | 肝糖输出比外周摄取更敏感（结论备查） |
+| [R11] | Nicolò A, Girardi M, Bazzucchi I, Felici F, Sacchetti M. Respiratory frequency and tidal volume during exercise: differential control and unbalanced interdependence. *Physiol Rep*. 2018;6(21):e13908. doi:10.14814/phy2.13908. PMID 30393984 | 运动通气由潮气量主导；单独提高呼吸频率会增加死腔通气 |
+| [R12] | Whipp BJ, Davis JA, Wasserman K. Ventilatory control of the 'isocapnic buffering' region in rapidly-incremental exercise. *Respir Physiol*. 1989;76(3):357-367. doi:10.1016/0034-5687(89)90076-5. PMID 2501844 | 等碳酸缓冲段：乳酸被 HCO₃⁻ 缓冲产生的 CO₂ 被通气排出，PaCO₂ 不降 |
+| [R13] | Stickland MK, Lindinger MI, Olfert IM, Heigenhauser GJF, Hopkins SR. Pulmonary Gas Exchange and Acid-Base Balance During Exercise. *Compr Physiol*. 2013;3(2):693-739. doi:10.1002/cphy.c110048. PMID 23720327 | 运动时 PaCO₂ 维持静息水平至接近极量；运动性酸中毒以代谢性为主 |
 
 完整的取用内容、查阅方式（PubMed E-utilities）以及**所有「估算」参数清单**见仓库根目录的 [`REFERENCES.md`](REFERENCES.md)。没有查过的不写进去——凭常识定的数值在代码里单独标了「估算」。
 
@@ -314,3 +318,70 @@ MIT
 对外提供 7 个 `public=True` 接口：`drunk_snapshot` / `log_drink` / `log_meal` / `get_state` / `get_clock` / `list_foods` / `adjust_mood`，供厨房、醉酒等插件调用。
 
 完整签名、返回结构、单位与契约见 **[只读状态 API](docs/只读状态API.md)**。
+
+---
+
+## 十七、酸碱与运动通气：模型依据
+
+本节集中列出「为什么运动时不该报酸中毒」以及酸碱模型的文献依据，完整条目见 [`REFERENCES.md`](REFERENCES.md) 的 [R11]–[R15]。
+
+### 三条核心结论
+
+| 结论 | 依据 | 模型如何落地 |
+| --- | --- | --- |
+| 运动通气的执行器官是**潮气量**，不是呼吸频率。单独提高呼吸频率会**增加死腔通气**并导致 CO₂ 潴留 | [R11] Nicolò 2018 | 被控量设为肺泡通气量 VA，反解 `tidal = VA*1000/rr + 150` |
+| 运动时 PaCO₂ **维持静息水平**（至接近极量），不会升到 59 | [R13] Stickland 2013 | 运动中 `pco2_set = 38.5 mmHg` |
+| 运动性酸中毒是**代谢性**的：乳酸被缓冲体系吸收，pH 会真实下降到 7.1~7.3 | [R12] Whipp 1989、[R13] | 乳酸降低碱剩余，再由 Van Slyke 方程反解 pH |
+| 血液缓冲**不止碳酸氢盐**：血红蛋白、血浆蛋白、磷酸盐都会吸收 H⁺，使同样酸负荷下 pH 少掉一部分 | [R14]、[R15] | Van Slyke 方程把非碳酸氢盐缓冲折算进碱剩余 |
+
+### 文献
+
+- **[R11]** Nicolò A, Girardi M, Bazzucchi I, Felici F, Sacchetti M. Respiratory frequency and tidal volume during exercise: differential control and unbalanced interdependence. *Physiol Rep*. 2018;6(21):e13908. doi:10.14814/phy2.13908. PMID 30393984.
+- **[R12]** Whipp BJ, Davis JA, Wasserman K. Ventilatory control of the isocapnic buffering region in rapidly-incremental exercise. *Respir Physiol*. 1989;76(3):357-367. doi:10.1016/0034-5687(89)90076-5. PMID 2501844.
+- **[R13]** Stickland MK, Lindinger MI, Olfert IM, Heigenhauser GJF, Hopkins SR. Pulmonary Gas Exchange and Acid-Base Balance During Exercise. *Compr Physiol*. 2013;3(2):693-739. doi:10.1002/cphy.c110048. PMID 23720327.
+- **[R14]** Siggaard-Andersen O. The van Slyke equation. *Scand J Clin Lab Invest Suppl*. 1977;146:15-20. doi:10.3109/00365517709098927. PMID 13478.
+- **[R15]** Krbec M, Waldauf P, Zadek F, Brusatori S, Zanella A, Duška F, Langer T. Non-carbonic buffer power of whole blood is increased in experimental metabolic acidosis: an *in-vitro* study. *Front Physiol*. 2022;13:1009378. doi:10.3389/fphys.2022.1009378.
+
+### 血液缓冲对：不只是碳酸氢盐
+
+血液的缓冲是**多对并联**的，碳酸氢盐只是其中容量最大的一对：
+
+| 缓冲对 | 位置 | 作用 | 本模型如何处理 |
+| --- | --- | --- | --- |
+| HCO₃⁻ / H₂CO₃ | 血浆 | 容量最大，CO₂ 可经肺排出（开放系统） | 显式状态量 `hco3` |
+| Hb / HHb | 红细胞内 | **全血缓冲容量的重要组成**，组氨酸咪唑基 pKa≈6.8 | 经 Van Slyke 折算进碱剩余 |
+| 血浆蛋白 | 血浆 | 贡献较小 | 同上 |
+| 磷酸盐 | 血浆/细胞内 | 贡献最小 | 同上 |
+
+**为什么不能只算 HCO₃⁻**：若让碳酸氢盐独自承担全部酸负荷，同一次酸中毒会被放大近一倍。实测对照（乳酸 10 mmol/L）：
+
+| 算法 | pH | 说明 |
+| --- | --- | --- |
+| 仅碳酸氢盐（1:1 消耗） | 7.194 | 低估了其他缓冲对的贡献 |
+| 完整缓冲（Van Slyke） | 7.285 | 与实测 7.30 吻合 |
+
+实现方式是**碱剩余（base excess, BE）**：把所有缓冲对吸收完酸之后「还剩多少碱」压缩成一个标量，再由 BE 与 pCO₂ 反解 pH。这样非碳酸氢盐缓冲会被自动计入，不需要逐个建模。
+
+```
+BE = 0.885 × ((HCO₃⁻ − 24.4) + 40.0 × (pH − 7.40))
+BE = 肾代偿增量 − 乳酸负荷
+由 BE 与 pCO₂ 二分求解 pH，再由 pH 反算 HCO₃⁻（保持自洽）
+```
+
+> 式中 40.0 是**体内有效**非碳酸氢盐缓冲当量，属经验标定：标准碱剩余（Hb 取 5 g/dL）只覆盖细胞外液，而人体约 60% 的缓冲发生在细胞内。标定目标是让运动性酸中毒幅度与实测吻合（乳酸 10 → pH≈7.29，实测 7.30）。
+
+### 缓冲会不会耗尽
+
+会。碳酸氢盐被持续消耗后，pH 下降会加速（缓冲能力随底物减少而衰减）；本模型的 HCO₃⁻ 下限为 2.0 mmol/L、pH 下限钳在 6.80，与「严重酸中毒已超出代偿能力」的生理事实一致，不会出现负浓度或数值发散。
+
+### 告警阈值为什么随运动状态变化
+
+真实人重运动时 pH 会生理性降到 7.1~7.2，这是**正常代偿而非病理**。若用固定阈值 7.30，每一次正常运动都会被报成「酸中毒」。因此：
+
+| 状态 | 酸中毒告警阈值 | 理由 |
+| --- | --- | --- |
+| 运动中 | < 7.10 | 乳酸性酸中毒属预期；只报真正危险的重度酸中毒 |
+| 运动后 30 min 内 | < 7.20 | 乳酸半衰期约 25 分钟，恢复期仍偏低 |
+| 静息 | < 7.30 | 常规阈值；此时低 pH 多为病理性（如脓毒症性乳酸酸中毒） |
+
+> 阈值本身是**工程取值，不是文献阈值**。乳酸与碱剩余的 1:1 当量关系取 Stewart/强离子差框架的教科书结论（每 1 mmol/L 乳酸 = 强离子差降 1 mEq/L），未找到一手测定文献；非碳酸氢盐缓冲当量 40.0 为经验标定值，两者详见 [`REFERENCES.md`](REFERENCES.md) 的估算标注表。
