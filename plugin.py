@@ -46,7 +46,7 @@ from .body.translate import FEELING_LEVELS, drunk_level, eat_phase, phase
 from .config import LifeBodyConfig
 from .link import LifeLink
 
-PLUGIN_VERSION = "1.2.3"
+PLUGIN_VERSION = "1.2.4"
 H2S = 3600.0
 SAVE_FILE = "body_state.json"
 
@@ -386,6 +386,8 @@ class LifeBodyPlugin(MaiBotPlugin):
 
         # 运动配置注入
         ex_cfg = getattr(self.config, "exercise", None)
+        # 年龄目前是引擎内置常量（18 岁），不暴露给使用者 —— 见
+        # docs/issues/issue_年龄无法改变心率上下限.md
         if ex_cfg is not None:
             self._engine.exercise_enabled = bool(getattr(ex_cfg, "enabled", True))
             self._engine.exercise_max_minutes = max(
@@ -434,12 +436,28 @@ class LifeBodyPlugin(MaiBotPlugin):
         # 老配置文件里没有 [excretion] 段时，config.excretion 仍由默认值填充，
         # 所以这里不需要额外兜底（PluginConfigBase 会实例化默认子配置）。
         exc = getattr(self.config, "excretion", None)
+        # 2026-11-17：threshold 必须小于 restore_health。写反了会让急救在第一次
+        # 出院后**永久失效** —— 健康停在 restore_health，永远爬不回阈值以上，
+        # 引擎的 _rescue_armed 就再也上不了膛（见 engine._rescue）。这里直接钳制，
+        # 并在日志里说明，避免配置错了却毫无提示。
+        _thr = max(0.0, min(99.0, float(cfg.threshold)))
+        _restore = max(0.0, min(100.0, float(cfg.restore_health)))
+        if _restore <= _thr:
+            _fixed = min(100.0, _thr + 1.0)
+            try:
+                self._get_logger().warning(
+                    "rescue.restore_health（%.0f）不高于 threshold（%.0f），已按 %.0f 处理；"
+                    "否则首次出院后急救不会再触发", _restore, _thr, _fixed)
+            except Exception:  # noqa: BLE001 - 日志失败不影响配置生效
+                pass
+            _restore = _fixed
+
         return {
             "rescue_enabled": bool(cfg.enabled),
-            "rescue_threshold": max(0.0, min(100.0, float(cfg.threshold))),
+            "rescue_threshold": _thr,
             "rescue_critical_seconds": max(0.0, float(cfg.critical_seconds)),
             "rescue_stay_hours": max(0.0, float(cfg.stay_hours)),
-            "rescue_restore_health": max(0.0, min(100.0, float(cfg.restore_health))),
+            "rescue_restore_health": _restore,
             "enable_void": bool(getattr(exc, "show_urination", True)) if exc else True,
             "enable_stool": bool(getattr(exc, "show_stool", True)) if exc else True,
         }

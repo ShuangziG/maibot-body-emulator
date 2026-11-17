@@ -16,7 +16,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用插件", "order": 1},
     )
     config_version: str = Field(
-        default="1.2.3",
+        default="1.2.4",
         description="配置版本，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True, "order": 0},
     )

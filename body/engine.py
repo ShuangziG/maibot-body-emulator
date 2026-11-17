@@ -40,7 +40,7 @@ def approach_tau(cur, target, dt, tau_sec):
     return cur + (target - cur) * min(1.0, dt / max(tau_sec, 1e-6))
 
 # 时间常数统一登记，便于审阅与调参
-_tau("hr", 12.0)
+_tau("hr", 12.0)   # 仅用于非运动场景的平滑；运动的上升/恢复改用下面两条独立常数
 _tau("bp", 20.0)
 _tau("rr", 30.0)
 _tau("o2", 8.0)
@@ -62,6 +62,77 @@ _tau("affect", 900.0)
 #   合计在糖负荷后可远超 500 g。旧上限 500 在连续高碳水饮食下会顶格，
 #   储存通道关闭后血糖失去主要去路 —— 实测两顿米饭就能冲到 15.8。
 GLYCOGEN_MAX = 800.0
+
+# ---- 运动的心率/体温动力学（2026-11-17）----
+# 旧实现的问题（实测）：
+#   1) 心率用 approach()，它是「线性比例 dt/τ」而不是指数，τ=12 s 意味着
+#      12 秒就走到目标 —— 一开跑心率从 70 直接跳到 119，停止后同样 12 秒回落。
+#   2) 运动强度完全不分级：中强度与高强度都是 +40 bpm、+0.8 ℃。
+#   3) 出汗只扣水，不参与散热，体温没有负反馈 —— 环境热 + 运动 + 黄体期叠加时
+#      目标温度可以顶到 38 ℃ 附近，被判成「低烧」。
+#
+# 文献口径（见 REFERENCES [R19]）：
+#   - 运动开始的心率上升以迷走撤退为主，很快（数十秒量级），随后交感激活把
+#     稳态推到与强度匹配的水平；
+#   - 运动后的心率恢复（HRR）靠迷走再激活，健康成人 1 分钟回落 15~25 bpm，
+#     完全恢复需数分钟 —— 与上升**不对称**，这是旧实现完全没有体现的；
+#   - 中等强度运动核心温度上升约 0.5~1.0 ℃，剧烈运动可达 38.3~39.4 ℃；
+#   - 散热靠出汗蒸发，随核心温度升高而增强，形成负反馈。
+HR_TAU_RISE = 20.0        # 运动开始的心率上升时间常数（s）
+HR_TAU_FALL = 95.0        # 运动结束的心率恢复时间常数（s）→ HRR1 ≈ 17~20 bpm
+HR_MAX_INTERCEPT = 208.0  # Tanaka 最大心率 = 208 − 0.7×年龄
+HR_MAX_SLOPE = 0.7
+HR_EX_FRAC_MID = 0.60     # 慢跑 = 60% HRmax（Zone 2 下限）
+HR_EX_FRAC_HIGH = 0.72    # 快跑 = 72% HRmax
+EX_RR_MID = 8.0           # 中强度额外呼吸频率（次/分）
+EX_RR_HIGH = 14.0
+EX_VCO2_MID = 0.35        # 中强度额外 CO2 产生量（L/min）
+EX_VCO2_HIGH = 0.60
+EX_TEMP_MID = 0.55        # 中强度产热（℃）
+EX_TEMP_HIGH = 1.10       # 高强度产热（℃）
+SWEAT_COOL = 0.35         # 出汗蒸发的散热权重（℃，sweat=1 时）
+
+# 葡萄糖有效性（glucose effectiveness，S_G）：不依赖胰岛素的被动摄取。
+# 2026-11-16 补（issue #6）：原处置项 0.19*G*(0.55+0.45*I) 在胰岛素饱和后
+# 只剩对 G 的一次项，斜率吸不掉肠道的持续灌入。三日高碳水（糖原顶格、
+# 储存通道关闭）时血糖与吸收会在 12.9~15.9 上达成平衡，高于健康人实测
+# 峰值（约 9~10）。真实机制里还有一条不靠胰岛素的去路 —— 血糖自身的
+# 质量作用：组织（肝、脑、肠、红细胞等）按浓度差被动摄取，最小模型
+# （Bergman）把它单列为 S_G ≈ 0.01~0.03 /min。
+# 这里以「相对静息基线的超出量」计，静息段与低血糖段恒为 0，
+# 因此不会像把 0.19 提到 0.24 那样连静息下限一起拉低（那样做实测
+# 静息 4.78 -> 4.46，已否决）。
+# 系数为工程取值：在既有标定基础上补斜率，不是文献绝对值代入。
+GE_SLOPE_DEFAULT = 0.020      # /min，等效 S_G
+GE_FLOOR_DEFAULT = 5.0        # mmol/L，低于此值不启用
+
+# 肠道葡萄糖吸收速率上限（mmol/min）。2026-11-16 补（issue #6 方向 3）：
+# 吸收是载体介导的（SGLT1/GLUT2），真实人体葡萄糖吸收约 1~1.5 g/min
+# （1 g 葡萄糖 = 5.56 mmol）。模型用一级动力学对肠糖池，负荷越大入血越快，
+# 无上限时双倍大份能到 1.86 g/min，超出载体能力。
+# 常规三餐实测吸收峰值 1.06 g/min，不触限；只有极端大份才会被削。
+ABSORB_CAP_MMOL_MIN = 8.33    # = 1.5 g/min
+
+# ---- 糖原满位后的溢出：脂肪合成（de novo lipogenesis, DNL）----
+# 2026-11-16 补（issue #6 极限测试的结论）：糖原顶到 800 g 后储存通道关闭，
+# 若碳水仍在灌入，模型只能把血糖推到更高来"匹配"吸收速率（实测双倍大份
+# 稳态 15.0、改动前 20）。真实人体有第三条出口：糖原满了以后，多余碳水
+# 一部分被氧化，一部分经 DNL 转成脂肪 —— 这正是 Acheson 1988 测到的。
+#
+# 文献（REFERENCES [R18]，Acheson KJ 等, Am J Clin Nutr 1988;48:240-247）：
+#   - 糖原可容纳约 500 g 的增益，之后净脂肪合成才开始增加体脂；
+#   - 大量碳水过载时，约 475 g 碳水/天 -> 150 g 脂肪/天（比值 3.17:1）；
+#   - 该实验中碳水利用率升到 1010±37 g/天，而循环血糖并未异常升高。
+#
+# 本模型没有脂肪代谢，产出的脂肪按需求直接丢弃（只做转换、不记账），
+# 因此这里只关心"从血糖里扣掉多少"，比值仅用于日志与自证。
+# 触发条件用「糖原 85% 满位 + 血糖 > 7.0」，两条同时满足才生效 ——
+# 正常饮食（糖原 400~650）与全部既有场景因此恒为 0，一字不动。
+DNL_CAP_MMOL_MIN = 3.5          # 葡萄糖去路速率上限 ≈ 38 g/h
+DNL_GAIN_PER_MMOL = 0.85        # 每高 1 mmol/L 血糖增加的 DNL 速率（mmol/min）
+DNL_FLOOR_MMOL = 7.0            # 血糖低于此值不合成脂肪
+DNL_TRIGGER_FRAC = 0.85         # 糖原达到 85% 上限时开始
+DNL_GLUCOSE_G_PER_FAT_G = 3.17  # Acheson 475 g CHO : 150 g 脂肪
 
 
 class BodyEngine:
@@ -110,6 +181,9 @@ class BodyEngine:
         # 的睡眠窗口、立刻入睡，WebUI 一打开就是"在睡觉"。
         # s.t 与 s.hour 解耦，靠时钟相位对齐，不伪造仿真时长。
         self.start_hour = 8.0
+        # 年龄：默认 18 岁，由插件按配置写入（见 plugin 的 age 赋值）。
+        # 只影响最大心率与运动目标心率；静息基线随年龄轻微上移。
+        self.age = 18
         self._fresh_body = seed_state is None
         if seed_state is None:
             self.clock_offset = self.start_hour
@@ -656,6 +730,10 @@ class BodyEngine:
             return False
         cap = max(5.0, float(self.exercise_max_minutes))
         minutes = min(max(5.0, float(duration_min)), cap)
+        # 2026-11-17：一律按**慢跑**处理。日程只能回答「要不要跑」，给不出配速/
+        # 距离/间歇结构，据此切强度档只是假装知道。强度分档的代码保留，
+        # 等有了可靠的烈度来源再接。见 docs/issues/issue_运动烈度无法控制.md
+        level = "mid"
         s.exercise_intent = level
         s.exercise_until = s.t + minutes * 60.0
         # 强度决定间歇：高强度跑短歇长，中等反过来
@@ -1389,14 +1467,37 @@ class BodyEngine:
         if s.hospital_until > s.t:
             return {"ok": False, "reason": "住院中，由医护供能"}
 
+        # 2026-11-17：入口校验（探索测试发现）。旧实现把未知食物与非法 kind 当
+        # 成功返回 ok=True，但血糖、胃内容物、「最近一餐」全无变化 —— 调用方会
+        # 拿到一个假成功。现在非法输入一律 ok=False 并说明原因。
+        kind = str(kind or "").strip().lower()
+        if kind not in {"meal", "snack", "drink"}:
+            return {"ok": False,
+                    "reason": f"kind 无效：{kind!r}，只支持 meal / snack / drink"}
+        keys_clean: list = []
+        unknown: list = []
+        for it in (list(items) if items else []):
+            k = it.strip() if isinstance(it, str) else str(it).strip()
+            if not k:
+                continue
+            if k in food.FOODS:
+                if k not in keys_clean:
+                    keys_clean.append(k)
+            else:
+                unknown.append(k)
+        if unknown:
+            return {"ok": False,
+                    "reason": "食物库里没有：" + "、".join(unknown[:3]),
+                    "unknown": unknown}
+
         if kind == "drink":
             # 2026-11-15：留空不再随机配饮品。旧实现走 food.pick_drink() 从
             # DRINK_POOL 里抽，模型报「我喝了半杯白酒」而解析不出具体饮品时，
             # 会落成随机果汁 —— 说了喝、身体没喝到点子上，比不记还误导。
             # 现在认不出就按白水记（零热量、零酒精、零咖啡因），并把
             # fallback 标记回传给上层，由它提示模型补具体饮品。
-            fallback = not items
-            keys = list(items) if items else [food.DEFAULT_DRINK_KEY]
+            fallback = not keys_clean
+            keys = keys_clean or [food.DEFAULT_DRINK_KEY]
             s.last_drink_t = s.t
             s.drinks += 1
             tot = self._scale_tot(food.combo_totals(keys), portion)
@@ -1413,7 +1514,7 @@ class BodyEngine:
                     "kcal": round(float(tot.get("kcal") or 0.0), 1)}
 
         slot = "snack" if kind == "snack" else self._meal_slot(s.hour)
-        keys = list(items) if items else (
+        keys = keys_clean or (
             food.pick_snack(self.rng) if slot == "snack" else food.pick_meal(slot, self.rng)
         )
         actual = self._eat_keys(slot, keys, note=note, ratios=ratios)
@@ -1617,18 +1718,37 @@ class BodyEngine:
         # 2026-11-08 重标定：旧系数(62/45/22)把日间静息 HR 拉到 82(beta)
         # 与真实 70-75 偏高，同时夜间因 r_m2 项过重掉到 44。现按
         # 日间 72、夜间 58 两个实测靶点反解：beta1 与 m2 的摆动幅度都收窄。
-        hr_t = (58.0 + 32.0 * s.r_beta1 - 16.0 * s.r_m2
+        # 静息基线随年龄轻微上移：18 岁 60、60 岁 68.4（成人静息 60~100 的偏年轻段）。
+        _age = float(getattr(self, "age", 18) or 18)
+        hr_rest_base = 60.0 + 0.20 * (_age - 18.0)
+        hr_t = (hr_rest_base + 32.0 * s.r_beta1 - 16.0 * s.r_m2
                 + 3.0 * (s.temp - 36.8) + 8.0 * (s.t3 - 1.0))
         if s.exercising:
-            hr_t += 40.0
+            # 运动目标按**最大心率百分比**定，不再是固定加数：
+            # 慢跑（Zone 2 下限）60% HRmax、快跑 72%。年龄越大 HRmax 越低，
+            # 同样的相对强度对应更低的绝对心率 —— 这是固定 +40 做不到的。
+            _hr_max = HR_MAX_INTERCEPT - HR_MAX_SLOPE * _age
+            _frac = (HR_EX_FRAC_HIGH
+                     if str(getattr(s, "exercise_intent", "") or "mid") == "high"
+                     else HR_EX_FRAC_MID)
+            hr_t = max(hr_t, _hr_max * _frac)
         # 睡眠时心率随笔迷走张力下降，深睡可降到 50 上下；不用运动那套 +40 的档
         # 睡眠对心率的效应已经全部通过 r_beta1 / r_m2 传进来了（交感下调 ->
         # beta1 降、迷走相对占优 -> M2 升）。这里不再另减，否则重复计账：
         # 实测叠加 -14 时夜间 HR 掉到 44、SBP 掉到 86，低于真人夜间下限。
         if self.link_activity > 0.0:
             hr_t += 10.0 * min(1.0, self.link_activity)
+        # 深睡期心率进一步下移：旧实现只有 r_m2 一项，18 岁深睡实测约 64，
+        # 而文献健康年轻人睡眠 45~70、常见 40~60。这里再压 6 bpm（不会像
+        # 早先试过的 -14 那样掉到 44）。
+        hr_t -= float(getattr(self, "hr_sleep_drop", 4.0)) * clamp(
+            float(getattr(s, "sleep_depth", 0.0) or 0.0), 0.0, 1.0)
         hr_t = clamp(hr_t, 35.0, 185.0)
-        s.hr = approach(s.hr, hr_t, dt, "hr")
+        # 方向性时间常数 + 指数逼近（见 EX_HR_* / HR_TAU_* 注释）：
+        # 上升快、下降慢，停止后 1 分钟回落约 15~25 bpm，而不是 12 秒归位。
+        _tau_hr = HR_TAU_RISE if hr_t >= s.hr else HR_TAU_FALL
+        _alpha_hr = min(1.0, 1.0 - math.exp(-dt / _tau_hr))
+        s.hr = clamp(s.hr + (hr_t - s.hr) * _alpha_hr, 35.0, 185.0)
 
         preload = clamp(s.blood_vol / 5000.0, 0.70, 1.15)
         afterload = 1.0 - 0.25 * max(0.0, s.r_alpha1 - 0.5)
@@ -1680,9 +1800,11 @@ class BodyEngine:
     # ------------------------------------------------------------------
     def _respiratory(self, dt):
         s = self.s
+        _lvl_hi = str(getattr(s, "exercise_intent", "") or "mid") == "high"
         rr_t = 14.0 + 6.0 * (s.stress / 100.0) + 0.8 * max(0.0, s.paco2 - 40.0) / 5.0
         if s.exercising:
-            rr_t += 8.0
+            # 强度分级：慢跑 +8、快跑 +14（旧实现一律 +8）。
+            rr_t += EX_RR_HIGH if _lvl_hi else EX_RR_MID
         s.rr = approach(s.rr, clamp(rr_t, 6.0, 40.0), dt, "rr")
 
         # ---- 肺泡通气量 -> 潮气量（2026-11-16）----
@@ -1706,7 +1828,7 @@ class BodyEngine:
         # 目标值 —— pCO2 不再因 rr 波动漂移；运动相位切换时 VCO2 阶跃、tidal
         # 同步阶跃，VA 瞬时到位，不会出现「VCO2 已降而 VA 未降」的碱中毒过冲。
         stress = max(0.0, float(getattr(s, "stress", 0.0) or 0.0))
-        vco2_t = 0.255 + (0.35 if s.exercising else 0.0)
+        vco2_t = 0.255 + ((EX_VCO2_HIGH if _lvl_hi else EX_VCO2_MID) if s.exercising else 0.0)
         vco2_t += max(0.0, s.temp - 37.0) * 0.06
         if s.exercising:
             pco2_set = 38.5
@@ -1943,6 +2065,19 @@ class BodyEngine:
         net_mmol_min = hepatic_mmol_min - tissue_mmol_min
         s.glucose = clamp(s.glucose + net_mmol_min / GLUCOSE_V * (dt / 60.0), 2.0, 25.0)
 
+        # ---- 葡萄糖有效性（质量作用）：不依赖胰岛素的被动摄取 ----
+        # 2026-11-16 补，闭合 issue #6「长时间连续高血糖」的收尾项。
+        # 只作用于「高出静息基线的部分」，所以：
+        #   静息 5.2、运动后 4.8、低血糖段 —— 本项为 0，既有标定一字不动；
+        #   只有高糖段获得额外斜率，这是把 12.9 压回 10 量级需要的那个去路。
+        # 单位：S_G[/min] × 超出量[mmol/L] × 分布容积[L] = mmol/min。
+        ge_slope = float(getattr(self, "ge_slope", GE_SLOPE_DEFAULT))
+        ge_floor = float(getattr(self, "ge_floor", GE_FLOOR_DEFAULT))
+        ge_mmol_min = ge_slope * max(0.0, s.glucose - ge_floor) * GLUCOSE_V
+        if ge_mmol_min > 0.0:
+            s.glucose = clamp(s.glucose - ge_mmol_min / GLUCOSE_V * (dt / 60.0),
+                              2.0, 25.0)
+
         # ---- 肾糖阈：血糖超过约 10 mmol/L 时经尿排糖（2026-11-16 补）----
         # 真实人体肾糖阈约 10 mmol/L（180 mg/dL）；超过后滤过的葡萄糖超出
         # 肾小管最大重吸收能力，多余部分随尿排出，是糖尿病/高血糖时的一条
@@ -1982,6 +2117,23 @@ class BodyEngine:
             d_store = store_mmol_min * (dt / 60.0)      # mmol（本步）
             s.glucose = clamp(s.glucose - d_store / GLUCOSE_V, 2.0, 25.0)
             s.glycogen = clamp(s.glycogen + d_store * GLUCOSE_G_PER_MMOL, 0.0, GLYCOGEN_MAX)
+
+        # ---- 糖原满位后的溢出：脂肪合成（DNL，见 DNL_* 常量与 [R18]）----
+        # 糖原还有空位时储存优先，本项为 0；顶格后多余葡萄糖从这里出清，
+        # 血糖因此不再靠"爬高"来匹配吸收速率。产出的脂肪不入任何账本（无脂肪模型）。
+        _dnl_frac = clamp((s.glycogen - DNL_TRIGGER_FRAC * GLYCOGEN_MAX)
+                          / ((1.0 - DNL_TRIGGER_FRAC) * GLYCOGEN_MAX), 0.0, 1.0)
+        if _dnl_frac > 0.0 and s.glucose > DNL_FLOOR_MMOL:
+            _dnl_mmol_min = min(DNL_CAP_MMOL_MIN,
+                                DNL_GAIN_PER_MMOL * (s.glucose - DNL_FLOOR_MMOL)) * _dnl_frac
+            if _dnl_mmol_min > 0.0:
+                _dnl_g = _dnl_mmol_min * (dt / 60.0) * GLUCOSE_G_PER_MMOL
+                s.glucose = clamp(s.glucose - _dnl_mmol_min / GLUCOSE_V * (dt / 60.0),
+                                  2.0, 25.0)
+                # 只为自证与排查保留的内存计数（不入存档、不上报）：
+                # 按 3.17:1 折算成"本可合成的脂肪克数"，随后丢弃。
+                self._dnl_glucose_g = float(getattr(self, "_dnl_glucose_g", 0.0)) + _dnl_g
+                self._dnl_fat_g = float(getattr(self, "_dnl_fat_g", 0.0)) + _dnl_g / DNL_GLUCOSE_G_PER_FAT_G
 
         # ---- 乳酸：产生快、清除慢的双相模型（2026-11-14 重写）----
         # 旧实现用单一 approach_tau(..., 180s) 逼近一个离散目标值：
@@ -2322,17 +2474,22 @@ class BodyEngine:
         # 「同一份碳水，入血的时间分布不同」，故这里按 GI 分两个半时：
         #   快池（高 GI） 半时 8 min  —— 葡萄糖/白面包/米饭，快速上冲
         #   慢池（低 GI） 半时 42 min —— 水果/豆类/全谷，缓升缓降
+        # 吸收速率上限（见 ABSORB_CAP_MMOL_MIN）：快慢两池共享一份预算，
+        # 超出载体能力的部分留在肠池里下一分钟继续吸，总量守恒不变。
+        _abs_budget = float(getattr(self, "absorb_cap_mmol_min", ABSORB_CAP_MMOL_MIN)) * (dt / 60.0)
         if s.gut_glucose > 1e-9:
             # 半时 18 -> 8 min：门静脉到体循环的转运本身只需几分钟。
             k_abs = math.log(2.0) / (8.0 * 60.0)
-            absorbed = s.gut_glucose * (1.0 - math.exp(-k_abs * dt))
+            absorbed = min(s.gut_glucose * (1.0 - math.exp(-k_abs * dt)), _abs_budget)
             s.gut_glucose -= absorbed
+            _abs_budget = max(0.0, _abs_budget - absorbed)
             s.glucose = clamp(s.glucose + absorbed / 14.0, 2.0, 25.0)
         if float(getattr(s, "gut_glucose_slow", 0.0) or 0.0) > 1e-9:
             # 慢池半时 42 min。低 GI 食物真正的降糖机制有一半在「延缓吸收」，
             # 另一半在「吸收后仍以较慢速度进入循环」，这里体现后半段。
             k_slow = math.log(2.0) / (42.0 * 60.0)
-            absorbed_slow = s.gut_glucose_slow * (1.0 - math.exp(-k_slow * dt))
+            absorbed_slow = min(s.gut_glucose_slow * (1.0 - math.exp(-k_slow * dt)),
+                                _abs_budget)
             s.gut_glucose_slow -= absorbed_slow
             s.glucose = clamp(s.glucose + absorbed_slow / 14.0, 2.0, 25.0)
 
@@ -2723,7 +2880,13 @@ class BodyEngine:
         # 前列腺素 PGE2 是内源性致热原：经期可致低热（0.1~0.3℃）
         base += 0.25 * clamp(s.prostaglandin, 0.0, 1.0)
         if s.exercising:
-            base += 0.8
+            # 强度分级产热（旧实现一律 +0.8）。
+            base += (EX_TEMP_HIGH if str(getattr(s, "exercise_intent", "") or "mid") == "high"
+                     else EX_TEMP_MID)
+        # 散热负反馈：出汗蒸发带走热量，随 sweat（本身由核心温度驱动）增强。
+        # 旧实现里 sweat 只扣体水、完全不参与体温 —— 于是运动+环境热+黄体期
+        # 可以一路叠加到 38 ℃ 被判「低烧」，且没有把它拉回来的机制。
+        base -= SWEAT_COOL * clamp(float(getattr(s, "sweat", 0.0) or 0.0), 0.0, 1.0)
         # 睡眠期核心体温下移 0.3~0.5 ℃，是昼夜曲线的低谷成因之一
         if s.sleep_depth > 0.0:
             base -= 0.30 * min(1.0, s.sleep_depth)
