@@ -364,10 +364,11 @@ class LinkConfig(PluginConfigBase):
     share_state: bool = Field(
         default=False,
         description=(
-            "身体状态触发主动分享：住院、濒危这类大事发生时，把「我现在怎么了」"
-            "作为一次主动分享契机交给日程插件。默认关，因为它会主动找你说话。仅麦生活支持"
+            "住院或首次进入濒危时，把这件事交给麦生活，让它有由头主动来找你说话。"
+            "每件事只发一次，出院不补发。这是本插件对麦生活唯一的一个写接口，"
+            "不会给模型注入任何内容；麦织没有对应接口，开启后静默跳过"
         ),
-        json_schema_extra={"label": "状态触发主动分享", "group": "同步开关", "order": 4},
+        json_schema_extra={"label": "病危时通知麦生活", "group": "同步开关", "order": 4},
     )
     interval_seconds: float = Field(
         default=60.0,
