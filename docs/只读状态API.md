@@ -101,21 +101,37 @@
  "world_t": 0.0, "hunger": 20.0, "thirst": 20.0, "energy": 80.0, "health": 100.0,
  "glucose": 5.0, "bac": 0.0, "gastric_volume_ml": 380.0,
  "last_meal_items": "西红柿 + 米饭", "last_meal_ts": 0.0, "drinks": 0,
- "sleeping": false, "stress": 20.0, "depression": 2.0}
+ "sleeping": false, "stress": 20.0, "depression": 2.0,
+ "euphoria": 4.8, "dysphoria": 0.0, "mood_valence": 0.0}
 ```
+
+> **v1.3.0 起**回传三个情绪字段：`euphoria`（欣快 0~100）、`dysphoria`（烦躁 0~100）、
+> `mood_valence`（瞬时情绪效价 -100~+100）。三者与 `depression`（长期心境）不同：
+> 前两者是当场感受，`mood_valence` 写入后约 6 分钟自衰减回 0。
 
 ### 16.7 `adjust_mood(...)` — 写入
 
-身体**没有 `mood` 字段**，只有 `stress`（压力）与 `depression`（累积应激）。两套签名都收：
+身体**没有长期 `mood` 字段**，情绪分三个层次，各自的时间尺度不同：
+
+| 层次 | 字段 | 写入参数 | 持续多久 |
+|---|---|---|---|
+| 长期心境 | `depression` | `depression_delta` / `depression_add` | 几天（由应激累积） |
+| 当场压力 | `stress` | `stress_delta` / `stress_add` / `mood_delta` | 约 15 分钟 |
+| 当场情绪 | `mood_valence` | **`valence`（v1.3.0 新增）** | 约 6 分钟自衰减 |
 
 ```python
 adjust_mood(stress_delta=5, reason="厨房：做好了饭")          # 厨房式
 adjust_mood(stress_add=3, depression_add=-2, label="暧昧")  # 醉酒式
 adjust_mood(mood_delta=4)                                   # 映射为 stress -2
+adjust_mood(valence=-45, reason="这一句里她在抱怨")          # v1.3.0：当场情绪
 ```
 
-- 每项夹在 ±20，最终值限制在 0~100；
+- `stress_delta` / `depression_delta` 每项夹在 ±20，最终值限制在 0~100；
 - `mood_delta` 按「心情好 = 压力降一半」保守映射，不直接写心情；
+- **`valence` 夹在 ±100，且是累加的** —— 一轮对话里多个分句各判一次不会互相覆盖；
+  引擎按约 6 分钟的时间常数让它自然衰减回 0，不会赖着不走；
+- 正面 `valence` 降压力、抬欣快；负面 `valence` 升压力、抬烦躁；
+- 返回值回显 `mood_valence` / `euphoria` / `dysphoria` 当前值，便于写入后闭环核对；
 - 传 `label` 或 `reason` 都会回显，便于审计。
 
 ### 16.8 契约

@@ -16,7 +16,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用插件", "order": 1},
     )
     config_version: str = Field(
-        default="1.2.4",
+        default="1.3.0",
         description="配置版本，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True, "order": 0},
     )
@@ -249,15 +249,24 @@ class SpeechConfig(PluginConfigBase):
     __ui_icon__ = "message-circle"
     __ui_order__ = 5
 
+    # 2026-11-19：这两个字段目前**没有任何代码消费**（全包零读取点，见开发备忘）。
+    # 与其让用户改了没反应，不如整段从面板隐藏（hidden），不占界面也不误导。
+    # 字段本身保留在配置模型里，将来实现时把 hidden 去掉即可。
     proactive_enabled: bool = Field(
         default=False,
-        description="是否允许麦麦主动说出身体状态（默认关闭）",
-        json_schema_extra={"label": "允许主动播报", "group": "主动播报", "order": 1},
+        description=(
+            "当前版本尚未实现：开启后不会有任何行为。"
+            "保留此字段是为将来的「身体自述主动播报」预留接口，"
+            "届时会另行说明触发条件与频率。"
+        ),
+        json_schema_extra={"label": "允许主动播报（未实现）", "group": "主动播报",
+                           "order": 1, "hidden": True},
     )
     min_interval_minutes: float = Field(
         default=120.0,
-        description="两次主动播报之间的最小间隔（分钟）",
-        json_schema_extra={"label": "播报最小间隔（分钟）", "group": "主动播报", "order": 0},
+        description="预留给将来的主动播报；当前未实现，改它不会有任何效果。",
+        json_schema_extra={"label": "播报最小间隔（分钟，未实现）", "group": "主动播报",
+                           "order": 0, "hidden": True},
     )
 
 
@@ -452,6 +461,72 @@ class ExcretionConfig(PluginConfigBase):
     )
 
 
+class ConflictConfig(PluginConfigBase):
+    """体感冲突校正：胃已排空但不饿时，补一句校正，免得模型把「胃空」说成「饿」。
+
+    只在冲突时说话，平时不占上下文。默认开启。
+    """
+
+    __ui_label__ = "体感冲突校正"
+    __ui_icon__ = "shield-check"
+    __ui_order__ = 11
+
+    enabled: bool = Field(
+        default=True,
+        description="胃已排空但不饿时补一句校正，免得模型把「胃空」说成「饿」。只在冲突时生效。",
+        json_schema_extra={"label": "启用冲突校正", "order": 0},
+    )
+    hunger_floor: float = Field(
+        default=65.0,
+        description="饥饿低于此值才算「不饿」；超过它说明确实饿了，本来就一致，不校正。",
+        json_schema_extra={"label": "饥饿判定上限", "order": 1},
+    )
+    gastric_idle_ml: float = Field(
+        default=150.0,
+        description="胃内容物低于这个体积才算「已排空」。",
+        json_schema_extra={"label": "胃排空判定（mL）", "order": 2},
+    )
+
+
+class EmotionConfig(PluginConfigBase):
+    """情绪感知（v1.2.5，实验性）：分析麦麦自己说的话，把情绪写进身体。
+
+    不调用任何模型、不消耗 token、不联网 —— 纯本机词典判定（约 0.75 MB）。
+    """
+
+    __ui_label__ = "情绪感知（实验性）"
+    __ui_icon__ = "smile"
+    __ui_order__ = 10
+
+    enabled: bool = Field(
+        default=False,
+        description=("开启后，插件会分析麦麦自己说出的每句话，把情绪写进身体。"
+                     "不消耗模型 token、不联网。判定基于内置情感词典，"
+                     "反讽与新梗可能判错。"),
+        json_schema_extra={"label": "启用情绪感知", "order": 0},
+    )
+    scale: float = Field(
+        default=1.0,
+        description="情绪强度倍率。1.0 为标定值；调大更敏感，调小更迟钝。",
+        json_schema_extra={"label": "强度倍率", "order": 1},
+    )
+    max_valence: float = Field(
+        default=60.0,
+        description="单句最多能写入多少情绪。越小越不容易被一句话带跑。",
+        json_schema_extra={"label": "单句上限", "order": 2},
+    )
+    min_chars: int = Field(
+        default=4,
+        description="短于这个字数的句子不判（太短没有足够信息）。",
+        json_schema_extra={"label": "最短字数", "order": 3},
+    )
+    cooldown_seconds: float = Field(
+        default=3.0,
+        description="两次判定之间的最小间隔（秒），防止连续短消息把情绪叠爆。",
+        json_schema_extra={"label": "判定间隔（秒）", "order": 4},
+    )
+
+
 class LifeBodyConfig(PluginConfigBase):
     """麦麦身体插件配置。"""
 
@@ -465,3 +540,5 @@ class LifeBodyConfig(PluginConfigBase):
     link: LinkConfig = Field(default_factory=LinkConfig)
     feeding: FeedingConfig = Field(default_factory=FeedingConfig)
     excretion: ExcretionConfig = Field(default_factory=ExcretionConfig)
+    emotion: EmotionConfig = Field(default_factory=EmotionConfig)
+    conflict: ConflictConfig = Field(default_factory=ConflictConfig)

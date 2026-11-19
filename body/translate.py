@@ -53,6 +53,15 @@ FEELING_LEVELS = {
                (90, "非常焦虑"), (101, "濒临崩溃")],
     "depression": [(5, "情绪平稳"), (15, "有点低落"), (35, "情绪低迷"),
                    (60, "明显抑郁"), (101, "重度低落")],
+    # 2026-11-18：APK 症状枚举里 Euphoria / Dysphoria 是并列的，
+    # 补上正性那一半，否则只有"低落"没有"高兴"。
+    # 阈值刻意错开整数：_pick 用的是 value < hi，落在边界上会跳档。
+    # 2026-11-18 按实测重排：原先 dysphoria 第一档只到 5，导致 6.3 分
+    # 就报"有点烦"（刚收下礼物时显然不对）；euphoria 第一档 10 也太窄。
+    "euphoria": [(8, "平常"), (24, "心情不错"), (46, "挺开心"),
+                 (68, "很兴奋"), (101, "兴奋到飞起")],
+    "dysphoria": [(10, "没什么不快"), (26, "有点烦"), (46, "心烦"),
+                  (66, "很烦躁"), (101, "烦躁到极点")],
     "pain": [(1, "没有疼痛"), (20, "轻微不适"), (45, "明显疼痛"), (70, "很疼"), (101, "剧痛")],
 }
 
@@ -71,6 +80,8 @@ NORMAL_BAND = {
     "stress": (0.0, 55.0),
     "depression": (0.0, 15.0),
     "pain": (0.0, 10.0),
+    "euphoria": (0.0, 40.0),     # 40 以下不必对 LLM 说（实测基线约 5）
+    "dysphoria": (0.0, 26.0),
 }
 
 # 体感条一律按「数值 0→100 从左到右」画，不做任何反向。
@@ -93,6 +104,8 @@ FEELING_DIRECTION = {
     "stress": True,
     "pain": True,
     "depression": True,
+    "euphoria": True,
+    "dysphoria": True,
 }
 
 # 各维度展示给用户看的词。
@@ -187,6 +200,34 @@ def feeling_bar_pct(key: str, value: float) -> float:
     return 100.0 - v
 
 
+# 最近一餐的时限（小时）。胃通常 2~4 小时排空，超过这个窗口再说「刚吃了」
+# 就与 gastric_volume=0 自相矛盾 —— 线上实测出现过餐后 4.97 小时仍输出
+# 「刚吃了米饭 + 油条 + 汤」，而胃内容物只有 0.05 mL。
+RECENT_MEAL_HOURS = 3.0
+
+
+def recent_meal_text(s) -> str:
+    """返回「刚吃了X」；超过时限或没有记录时返回空串。
+
+    2026-11-19 新增：原先 `describe()` 只看 `last_meal_items` 非空就说
+    「刚吃了」，而这个字段在吃完后从不清空 —— 于是那句话会永久挂着。
+    同时 `plugin._body_prompt_note()` 里另写了一份「3 小时内」的判断，
+    两套口径不一致（一条说"刚吃了"，一条不说）。现统一到本函数，单一来源。
+
+    时限缺失或时间戳异常时按"不可信"处理，宁可不说也不说错。
+    """
+    items = getattr(s, "last_meal_items", "") or ""
+    if not items:
+        return ""
+    try:
+        since_h = (float(getattr(s, "t", 0.0)) - float(getattr(s, "last_meal_t", 0.0))) / 3600.0
+    except (TypeError, ValueError):
+        return ""
+    if since_h < 0.0 or since_h > RECENT_MEAL_HOURS:
+        return ""
+    return f"刚吃了{items}"
+
+
 def describe(s, detail: bool = True) -> str:
     """把一次身体快照翻成一段中文自述。接受 BodyState 或 snapshot() 的 dict。
 
@@ -235,6 +276,12 @@ def describe(s, detail: bool = True) -> str:
             feel.append(f"疼痛：{_pick(FEELING_LEVELS['pain'], s.pain)}")
         if not _is_normal("depression", s.depression):
             feel.append(f"心境：{_pick(FEELING_LEVELS['depression'], s.depression)}")
+    # 2026-11-18：补正性一极。正常时按 NORMAL_BAND 省略，异常才点名，
+    # 与本节其余项的去噪口径一致。
+    if s.euphoria > NORMAL_BAND["euphoria"][1]:
+        feel.append(f"欣快：{_pick(FEELING_LEVELS['euphoria'], s.euphoria)}")
+    if s.dysphoria > NORMAL_BAND["dysphoria"][1]:
+        feel.append(f"烦躁：{_pick(FEELING_LEVELS['dysphoria'], s.dysphoria)}")
     if feel:
         parts.append("，".join(feel))
 
@@ -243,8 +290,9 @@ def describe(s, detail: bool = True) -> str:
     # 注意这两项与上面的"正常就省略"略有不同：「刚吃了米饭」即使不异常
     # 也是 LLM 常用的事实（会被问"你吃了没"），故仍然保留。
     gut = []
-    if getattr(s, "last_meal_items", ""):
-        gut.append(f"刚吃了{s.last_meal_items}")
+    meal_text = recent_meal_text(s)
+    if meal_text:
+        gut.append(meal_text)
     if getattr(s, "gastric_volume", 0.0) > 150.0:
         gut.append(eat_phase(s.gastric_volume))
     if gut:

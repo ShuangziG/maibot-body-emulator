@@ -14,30 +14,12 @@ from datetime import date as _date, datetime as _datetime
 from .state import BodyState, clamp
 from .events import Event, EventBus
 from . import food
+from . import endocrine
 
-H2S = 3600.0
-TAU = {}  # 各子系统时间常数（秒）
-
-
-def _tau(key, sec):
-    TAU[key] = sec
-    return sec
-
-
-def approach(cur, target, dt, key):
-    """一阶惯性逼近，显式欧拉 + 稳定限幅。
-
-    2026-11-08 修：旧实现一律写 cur + (target-cur)*dt/TAU，当 dt >= TAU 时
-    系数 >= 1，显式欧拉越过稳定界 —— dt=20 s 时 TAU["hr"]=12 系数 1.667，
-    心率与血压会在几十步内发散到负数（实测 SBP=-517、DBP=-1725）。
-    限幅到 1.0 后，dt 再大也只是「一步到位」，不会过冲。
-    """
-    return cur + (target - cur) * min(1.0, dt / TAU[key])
-
-
-def approach_tau(cur, target, dt, tau_sec):
-    """同上，但时间常数直接给秒数（用于未登记进 TAU 的局部量）。"""
-    return cur + (target - cur) * min(1.0, dt / max(tau_sec, 1e-6))
+# 数值底座已抽到 dynamics.py（2026-11-18 结构规整）。
+# 这里 re-export 同名符号，保证 engine 内部 20 余处 _tau()/approach() 调用
+# 以及外部可能存在的 engine.TAU 引用都不受影响。
+from .dynamics import H2S, TAU, _tau, approach, approach_tau  # noqa: E402
 
 # 时间常数统一登记，便于审阅与调参
 _tau("hr", 12.0)   # 仅用于非运动场景的平滑；运动的上升/恢复改用下面两条独立常数
@@ -47,15 +29,25 @@ _tau("o2", 8.0)
 _tau("glucose", 240.0)
 _tau("atp", 60.0)
 _tau("renal", 60.0)
-_tau("raas", 90.0)
-_tau("ang2", 60.0)
-_tau("aldo", 300.0)
-_tau("cortisol", 600.0)
-_tau("acth", 300.0)
-_tau("thyroid", 1800.0)
-_tau("adh", 300.0)
+# 内分泌轴的时间常数不在此处 —— 已迁到 body/endocrine.py 的模块头，
+# 与各自的激素注册表放在一起（单一来源）。此处若再登记会覆盖同样的值，
+# 看似无害实则制造两处真相。
 _tau("temp", 300.0)
 _tau("affect", 900.0)
+
+# ---- 情绪神经内分泌（2026-11-18 新增）----
+# GCR 的 Hill 参数（GCR_KD / GCR_N）已迁到 body/endocrine.py，
+# 与受体注册表同处（单一来源）。
+# 瞬时情绪场的自衰减时间常数（秒）。2026-11-18 由 900 改 360：
+# 实测 900 s 时连续同向事件会线性叠加到上限（"+30 晚安"反而比
+# "+60 带好吃的"更兴奋），因为上一句还没消退下一句又加上去。
+# 360 s（6 min）下，一句话的影响仍能覆盖几轮对话，但不会无限累积。
+MOOD_TAU = 360.0
+# 欣快/烦躁的自身时间常数（秒）。2026-11-18 与 MOOD_TAU 分开：
+# 实测共用一个 τ=900 时，一句"你真好"只让 euphoria 爬到 7.2，
+# 而分档要到 30 才叫"心情不错" —— 等于接上 NLP 也看不出反应。
+# 归一化：当场感受该在 3 分钟内基本到位，而不是 15 分钟。
+EUPH_TAU = 180.0
 
 # 糖原储存容量上限（g）。2026-11-16 由 500 提到 800：
 #   文献：骨骼肌糖原约 400~900 g（随训练与饮食大幅波动）+ 肝糖原 100~120 g，
@@ -1705,9 +1697,9 @@ class BodyEngine:
 
         s.symp = symp
         s.para = para
-        s.r_beta1 = clamp(0.12 + 0.55 * symp + 0.10 * s.adrenaline, 0, 1)
-        s.r_alpha1 = clamp(0.08 + 0.45 * symp + 0.07 * s.ang2, 0, 1)
-        s.r_m2 = clamp(0.15 + 0.55 * para, 0, 1)
+        # 受体占据已迁到 body/endocrine.py（2026-11-18）。
+        # 注意传的是局部 symp/para 而非 s.symp —— 后者是动态属性、不进存档。
+        endocrine.step_autonomic_receptors(s, symp, para)
 
     # ------------------------------------------------------------------
     # 心血管：心率 -> 每搏量 -> 心输出量 -> MAP -> SBP/DBP
@@ -2795,46 +2787,14 @@ class BodyEngine:
             self.bus.emit(Event(s.t, "menstrual_cycle", "info", "新一轮周期开始", {}))
 
     def _endocrine(self, dt):
-        s = self.s
-        dif = (s.osmol - 290.0)
+        """内分泌总入口（2026-11-18 拆分后只剩委托）。
 
-        # ---- RAAS ----
-        renin_t = clamp(1.0 + (1.0 - s.blood_vol / 5000.0) * 3.0 + (90.0 - s.map) / 40.0, 0.2, 4.0)
-        s.renin = approach(s.renin, renin_t, dt, "raas")
-        s.ang2 = approach(s.ang2, clamp(s.renin * 1.2, 0.2, 3.0), dt, "ang2")
-        s.aldosterone = approach(s.aldosterone, clamp(s.ang2 * 0.8, 0.0, 3.0), dt, "aldo")
-
-        # 醛固酮保钠的「回收」动作已移入 _renal 里与排钠同处计算，
-        # 因为需要用到当步的 na_excrete 才能守恒（钠只能从尿里省，不能凭空造）。
-        # 这里只保留说明，不做任何加减。
-
-        # ---- ADH ----
-        # 容量抑制：血容量偏高时 ADH 下降（水负荷抑制），这是打破
-        # 「高钠 -> 高 ADH -> 少尿 -> 钠更积」正反馈的关键
-        vol_suppress = clamp(5000.0 / max(s.blood_vol, 3800.0), 0.55, 2.0)
-        adh_t = clamp((1.0 + dif * 0.15) * vol_suppress, 0.05, 4.0)
-        # 酒精抑制 ADH 释放（渗透压与容量调节之外的独立通路）：
-        # 这是"喝酒利尿"的直接原因 —— 三罐啤酒能多排出 500-800 mL 自由水。
-        if s.bac > 0.0:
-            adh_t = clamp(adh_t * (1.0 - 0.62 * clamp(s.bac / 1.0, 0.0, 1.0)), 0.03, 4.0)
-        s.adh = approach(s.adh, adh_t, dt, "adh")
-
-        # ---- HPA ----
-        cort_t = clamp(0.5 + 0.09 * s.circ + 1.20 * (s.stress / 100.0)
-                       + 0.30 * max(0.0, s.glucose - 8.0) * 0.2, 0.10, 3.0)
-        s.cortisol = approach(s.cortisol, cort_t, dt, "cortisol")
-        s.acth = approach(s.acth, clamp(s.cortisol * 0.8, 0.05, 2.0), dt, "acth")
-
-        # 皮质醇升高血糖
-        s.glucose += 0.004 * max(0.0, s.cortisol - 0.6) * dt / 60.0
-
-        # ---- 肾上腺素 ----
-        adr_t = clamp(0.15 + 0.6 * (s.stress / 100.0) + (0.5 if s.exercising else 0.0), 0.05, 1.5)
-        s.adrenaline = approach_tau(s.adrenaline, adr_t, dt, 30.0)
-
-        # ---- 甲状腺 ----
-        s.tsh = approach(s.tsh, 1.0, dt, "thyroid")
-        s.t3 = approach(s.t3, clamp(1.0 + 0.15 * s.circ, 0.7, 1.4), dt, "thyroid")
+        各条轴已迁到 body/endocrine.py，本方法只负责保证：
+          1) engine.step() 的调用点与顺序不变；
+          2) 每条轴变成可独立测试的纯函数；
+          3) 激素/受体的元数据集中在 endocrine.HORMONES / RECEPTORS。
+        """
+        endocrine.step(self.s, dt)
 
     # ------------------------------------------------------------------
     # 体温调节
@@ -2927,6 +2887,15 @@ class BodyEngine:
         s = self.s
         fasted_h = (s.t - s.last_meal_t) / H2S
         drank_h = (s.t - s.last_drink_t) / H2S
+
+        # ---- 瞬时情绪场自然回落（2026-11-18 新增）----
+        # 外部每写一次 mood_valence 就抬一次，这里负责让它过去。
+        # 指数衰减 + 死区归零：低于 0.05 直接清零，否则浮点尾数会永远挂着
+        # 一个非零小值，让 WebUI 上"情绪"那一栏永远不归位。
+        if s.mood_valence:
+            s.mood_valence *= math.exp(-dt / MOOD_TAU)
+            if abs(s.mood_valence) < 0.05:
+                s.mood_valence = 0.0
 
         # 饥饿：三通道合成，缺一不可
         #   (a) 时间通道 —— 距上一餐的小时数，指数趋近 100。这是最基础的驱动。
@@ -3075,7 +3044,13 @@ class BodyEngine:
                          + max(0.0, s.hunger - 70.0) * 0.35
                          + max(0.0, s.pain) * 0.5
                          # PMS：黄体后期激素双降引起的情绪负荷（5-HT 能紊乱的简化）
-                         + s.pms_load * 18.0, 0.0, 100.0)
+                         + s.pms_load * 18.0
+                         # 瞬时情绪：正面降压、负面升压。系数 0.55 使得
+                         # valence 满值 ±100 时对应 ∓55 分压力，不至于一句话
+                         # 就把她推到"濒临崩溃"（那是 90 分以上）。
+                         # mood_valence 默认 0，故此式在未接入外部输入时
+                         # 与改动前逐位一致。
+                         - s.mood_valence * 0.55, 0.0, 100.0)
         s.stress = approach(s.stress, stress_t, dt, "affect")
 
         # 体感温度（50 为舒适）。
@@ -3110,11 +3085,42 @@ class BodyEngine:
             0.0, 100.0,
         )
 
+        # ---- 欣快 / 心境恶劣双向轴（2026-11-18 新增）----
+        # 依据 LIFE.apk 症状枚举：Euphoria 与 Dysphoria 并列存在。
+        # 本插件此前只有 depression 单向，做不出"开心到飞起"，只能做"低落"。
+        #
+        # 口径（工程映射，非文献直接给系数）：
+        #   正向驱动 = 瞬时情绪场 + 内啡肽（愉悦/镇痛的共同介质）+ 低压力余量
+        #   负向驱动 = 瞬时情绪场 + 高压段 + 疼痛 + PMS 负荷
+        # 两者同时计算、互不排斥，但结构上互补：stress 低时正的占优，
+        # stress 高时负的占优。不强行做成"和为零"，因为真实情绪可以
+        # 既亢奋又焦躁（混合状态）。
+        # 系数 0.8 -> 1.8：实测 0.8 时+45 只到 euphoria 7.2，接上 NLP 也看不见。
+        # 1.8 时同样输入可到 80 档附近（上限 100），落在"很兴奋"区间。
+        pos_drive = (max(0.0, s.mood_valence) * 1.8
+                     + clamp(s.endorphin, 0.0, 1.0) * 25.0
+                     + max(0.0, 30.0 - s.stress) * 0.25)
+        neg_drive = (max(0.0, -s.mood_valence) * 1.8
+                     + max(0.0, s.stress - 50.0) * 0.6
+                     + max(0.0, s.pain) * 0.4
+                     + clamp(s.pms_load, 0.0, 1.0) * 20.0)
+        # 用 EUPH_TAU 而不是 "affect"：当场感受与长期心境分开演进。
+        s.euphoria = approach_tau(s.euphoria, clamp(pos_drive, 0.0, 100.0), dt, EUPH_TAU)
+        s.dysphoria = approach_tau(s.dysphoria, clamp(neg_drive, 0.0, 100.0), dt, EUPH_TAU)
+
         # 低落（APK 症状枚举 Depression 的直接对应物）。
         # 口径：持续的应激负荷累积 + 当前压力水平，无社会/睡眠输入 —— 那些量
         # APK 里查无依据。stress_load 是应激对情绪的累积积分，τ=6h 缓慢消退。
-        s.stress_load += (max(0.0, s.stress - 50.0) * dt / H2S
-                          - s.stress_load * dt / (6.0 * H2S) * 6.0)
+        #
+        # 2026-11-19 两处修正（v1.2.4 → v1.2.5）：
+        #   1) 门槛 50 → 40。实测正常对话下压力峰值只有 34.9~43.6，加上疼痛/
+        #      PMS 后才越过 40；原门槛 50 永远够不着，导致 depression 恒为 2.0
+        #      （面板永远显示"情绪平稳"），长期心境这一维等于死的。
+        #   2) 原式 `* 6.0` 与 `/ (6.0 * H2S)` 相互抵消，实际 τ=1 小时，
+        #      与注释声明的 6 小时差 6 倍 —— "长期"心境只记一小时的事，等于中途失忆。
+        #      现把增长项与消退项同除 6：稳态仍为 (stress - 门槛)，只改快慢，不动幅度。
+        s.stress_load += (max(0.0, s.stress - 40.0)
+                          - s.stress_load) * dt / (6.0 * H2S)
         s.stress_load = clamp(s.stress_load, 0.0, 100.0)
         dep_t = clamp(2.0 + 0.9 * s.stress_load + 0.20 * max(0.0, s.stress - 60.0), 0.0, 100.0)
         s.depression = approach(s.depression, dep_t, dt, "affect")

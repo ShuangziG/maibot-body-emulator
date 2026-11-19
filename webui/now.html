@@ -248,6 +248,15 @@
         </div>
         <canvas class="lb-canvas" id="chart-meta" height="260"></canvas>
       </div>
+      <div style="grid-column:1/-1">
+        <div class="lb-chart-legend">
+          <span><i class="lb-dot" style="background:#1baf7a"></i>欣快</span>
+          <span><i class="lb-dot" style="background:#eb6834"></i>烦躁</span>
+          <span><i class="lb-dot" style="background:#8f8f8f"></i>压力</span>
+          <span><i class="lb-dot" style="background:#6250d6"></i>瞬时情绪效价（右轴 -100~+100）</span>
+        </div>
+        <canvas class="lb-canvas" id="chart-emotion" height="260"></canvas>
+      </div>
     </div>
   </section>
 
@@ -631,9 +640,18 @@
     var rightSeries = series.filter(function (s) { return s.axis === 'right'; });
     // 全部系列都在右轴时，仍要有主轴可用
     if (!leftSeries.length) { leftSeries = rightSeries; rightSeries = []; }
-    var L = chartSpan(leftSeries, zeroBase);
+    // 2026-11-19：允许显式指定量程。原先一律按数据自身范围自适应，
+    // 情绪图里左轴三项（欣快/烦躁/压力）实测只落在 0~47，于是压力 47
+    // 被画到接近顶端 —— 「明明轻松，看起来却顶格」。固定 0~100 即可。
+    var L = (opts && opts.leftDomain)
+      ? { min: opts.leftDomain[0], max: opts.leftDomain[1] }
+      : chartSpan(leftSeries, zeroBase);
     if (!L) return;
-    var R = rightSeries.length ? chartSpan(rightSeries, false) : null;
+    var R = rightSeries.length
+      ? ((opts && opts.rightDomain)
+          ? { min: opts.rightDomain[0], max: opts.rightDomain[1] }
+          : chartSpan(rightSeries, false))
+      : null;
 
     var leftTick = (opts && opts.tick === 2) ? 1 : 0;
     var rightTick = (opts && opts.tickRight !== undefined)
@@ -707,6 +725,16 @@
       { data: s.glucose || [], color: '#eda100' },
       { data: s.temp || [], color: '#6250d6', axis: 'right' }
     ], { labels: labels, tick: 2, tickRight: 1 });
+    // v1.2.5：情绪曲线。欣快/烦躁/压力 0~100 走左轴；
+    // 瞬时情绪效价 -100~+100 走右轴 —— 两者量纲正负不同，必须分轴。
+    drawChart($('chart-emotion'), [
+      { data: s.euphoria || [], color: '#1baf7a' },
+      { data: s.dysphoria || [], color: '#eb6834' },
+      { data: s.stress || [], color: '#8f8f8f' },
+      { data: s.mood_valence || [], color: '#6250d6', axis: 'right' }
+    // 左轴固定 0~100（三向体感），右轴固定 -100~+100（瞬时效价）。
+    ], { labels: labels, tick: 0, tickRight: 0,
+         leftDomain: [0, 100], rightDomain: [-100, 100] });
   }
 
   async function loadNow() {

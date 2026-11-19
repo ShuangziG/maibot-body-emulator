@@ -491,7 +491,7 @@ PMID: 24739289
 | AHA 与 Zone 2 资料（二手汇总） | 中等强度 = 50~70% HRmax；**慢跑 = Zone 2 = 60~70% HRmax** |
 
 **落地结果**：
-- `age` 是引擎**内置常量 18**（`BodyEngine.age`），不进配置、不进面板 —— 见 docs/issues/issue_年龄无法改变心率上下限.md。
+- `age` 是引擎**内置常量 18**（`BodyEngine.age`），不进配置、不进面板 —— 见 [issue #9](https://github.com/ShuangziG/maibot-body-emulator/issues/9)。
 - 运动目标心率改为 `max(当前公式, HRmax × 强度百分比)`：慢跑 60%、快跑 72%——年龄越大目标越低，这是固定 `+40 bpm` 做不到的。
 - 静息基线 `60.0 + 0.20 × (年龄 − 18)`：18 岁日间约 73、夜间深睡约 61（跌幅 16%）；60 岁日间约 82。
 - 呼吸频率与 CO₂ 产热也按强度分档：慢跑 +8 次/分、+0.35 L/min；快跑 +14、+0.60。
@@ -501,3 +501,125 @@ PMID: 24739289
 - 睡眠心率由两块构成：一是交感/迷走张力（`r_beta1` / `r_m2`），二是显式的**深睡项** `−4.0 × 睡眠深度`。取 4.0 的依据是两条约束同时满足：①绝对值 61 落在文献睡眠心率 45~70 内；②夜间跌幅 (73−61)/73 = **16%**，落在文献夜间心率跌幅 10~20% 内。若取 6.0（早期试值）绝对值 58 仍合格，但跌幅 21% 超出常见区间，故定为 4.0。
 - 「慢跑 = 60% HRmax」取的是 Zone 2 下限（60~70% 的保守端），与「目前只按最低档算」的要求一致；快跑 72% 也仍在中等强度上沿，未做冲刺级（>85%）档。
 - 年龄目前**固定 18 岁**，配置项存在但请勿随意改；改年龄会同时改变静息基线与运动目标两处。
+---
+
+## 情绪神经内分泌（2026-11-18 v1.3.0 新增，[R21]-[R35]）
+
+**用途**：为情绪系统（欣快/烦躁双向轴 + 糖皮质激素受体）提供依据。
+以下文献均经 PubMed E-utilities（esummary 取元数据、efetch XML 取摘要）实测读取，
+不是凭记忆写入的。检索式与原始返回存于 `_emotion_probe/`（开发用，不随插件发布）。
+
+**[R21] Knezevic E, Nenic K, Milanovic V, et al.** The Role of Cortisol in Chronic Stress,
+Neurodegenerative Diseases, and Psychological Disorders. *Cells*. 2023 Nov 29.
+doi:10.3390/cells12232726. PMID 38067154.
+取用：皮质醇由**肾上腺**产生；释放受**视交叉上核**调控昼夜节律并激活 **HPA 轴**；
+慢性应激/疾病/衰老致其调节紊乱；**社会等级等社会因素**也会影响皮质醇水平。
+
+**[R22] Lei AA, Phang VWX, Lee YZ, et al.** Chronic Stress-Associated Depressive Disorders:
+The Impact of HPA Axis Dysregulation and Neuroinflammation on the Hippocampus - A Mini Review.
+*Int J Mol Sci*. 2025 Mar 24. doi:10.3390/ijms26072940. PMID 40243556.
+取用：HPA 轴**持续**激活破坏皮质醇调节→身心健康下降；与炎症、氧化应激交互→神经炎症→
+**海马**结构与功能改变，而海马是**情绪调节**与认知的关键结构。
+
+**[R23] Berridge CW, Waterhouse BD.** The locus coeruleus-noradrenergic system: modulation of
+behavioral state and state-dependent cognitive processes. *Brain Res Brain Res Rev*. 2003 Apr.
+doi:10.1016/s0165-0173(03)00143-7. PMID 12668290.
+取用：蓝斑向全中枢供去甲肾上腺素；促进**显著性**信息处理；参与**觉醒状态**的启动与维持；
+在觉醒态内以**浓度依赖**方式调节感觉、注意与记忆。
+
+**[R24] Berridge KC, Robinson TE.** What is the role of dopamine in reward: hedonic impact,
+reward learning, or incentive salience? *Brain Res Brain Res Rev*. 1998 Dec.
+doi:10.1016/s0165-0173(98)00019-8. PMID 9858756.
+取用：原文明确回答——多巴胺**不**介导享乐影响、**不**介导享乐性奖赏学习，而是介导
+**动机显著性（incentive salience）**，且该功能**可与享乐分离**。
+证据：伏隔核+新纹状体多巴胺耗竭达 99% 的大鼠仍保留正常享乐/厌恶反应。
+**建模含义**：本插件不实现多巴胺；若将来实现，只能做「想要」不能做「快乐值」。
+
+**[R25] Moncrieff J, Cooper RE, Stockmann T, Amendola S, Hengartner MP, Horowitz MA.**
+The Serotonin Theory of Depression: A Systematic Umbrella Review of the Evidence.
+原刊 *Molecular Psychiatry* 2022（doi:10.1038/s41380-022-01661-0，见 [R26] 摘要转述）；
+本次读取的是 *Focus (Am Psychiatr Publ)* 2026 转载版，doi:10.1176/appi.focus.26024112. PMID 42538881.
+取用：伞状综述覆盖 5-HT 及 5-HIAA 浓度、5-HT1A 受体结合、SERT 水平、色氨酸耗竭、
+SERT 基因等；**结论不支持**抑郁与血清素浓度/活性降低存在一致关联。
+**诚实标注**：本条为**转载版**元数据，原刊条目未直接读取。
+
+**[R26]** The myth of serotonin theory of depression: an analysis of umbrella review
+methodologies and clinical implications. *Psychiatr Danub*. 2025 Sep. PMID 40982824.
+取用：对 [R25] 的**方法学批评**——指出其事后修改方案、选择性报告、下调血清素能发现权重
+等问题，认为结论被削弱，主张更细致的理解。
+**用途**：本条存在的意义是说明 [R25] **并非学界共识**。本插件因此**不实现血清素**；
+若要实现，只能作为「情绪稳定性/易感度」参数，不能做「5-HT 低 → 抑郁」。
+
+**[R27] Jurek B, Neumann ID.** The Oxytocin Receptor: From Intracellular Signaling to Behavior.
+*Physiol Rev*. 2018 Jul 1. doi:10.1152/physrev.00031.2017. PMID 29897293.
+取用：催产素/OXTR 在生殖、**社会与情绪行为**中的作用；除射乳与子宫收缩外，
+还涉及性行为、母性行为、**配对联结**，以及**焦虑、信任**等。
+
+**[R28] Bodnar RJ.** Endogenous opiates and behavior: 2014. *Peptides*. 2016 Jan.
+doi:10.1016/j.peptides.2015.10.009. PMID 26551874.
+取用：内源性阿片系统年度综述（第 37 期）；覆盖**疼痛与镇痛**、**应激与社会地位**、
+摄食饮水、耐受与依赖等行为效应。本插件的内啡肽目前只用于镇痛。
+
+**[R29] Hantsoo L, Epperson CN.** Allopregnanolone in premenstrual dysphoric disorder (PMDD):
+Evidence for dysregulated sensitivity to GABA-A receptor modulating neuroactive steroids across
+the menstrual cycle. *Neurobiol Stress*. 2020 May. doi:10.1016/j.ynstr.2020.100213. PMID 32435664.
+取用：PMDD 是**黄体期**出现的重度情绪障碍，核心症状为**情感不稳、易激惹、抑郁心境、焦虑**，
+且**应激敏感性升高**；可概念化为对神经活性类固醇**敏感性次优**的障碍；
+别孕烯醇酮是 GABA-A 正向别构调节剂；ALLO-GABA 对 HPA 轴控制不良→黄体期应激敏感性升高。
+**建模含义（重要）**：关键不是激素水平高低，而是**敏感性失调**。
+本插件现有 `pms_load` 走的是「黄体后期激素双降」，**机制上与文献不符**（症状方向对了）。
+
+**[R30] Tiranini L, Nappi RE.** Recent advances in understanding/management of premenstrual
+dysphoric disorder/premenstrual syndrome. *Fac Rev*. 2022. doi:10.12703/r/11-11. PMID 35574174.
+取用：PMS/PMDD 为**黄体期**障碍；卵巢类固醇（雌二醇、孕酮）被认为是**致病效应物**，
+但关键特征是 **GABA 能中枢抑制系统对别孕烯醇酮的敏感性改变**；另有血清素可用性降低参与。
+
+**[R31] Dekkers TJ, van Rentergem JAA, Meijer B, et al.** A meta-analytical evaluation of the
+dual-hormone hypothesis. *Neurosci Biobehav Rev*. 2019 Jan. doi:10.1016/j.neubiorev.2018.12.004.
+PMID 30529754.
+取用：30 篇文献/33 研究/49 效应量/**n=8538**；睾酮×皮质醇交互对地位相关行为
+**仅边际支持**，效应量极小（**r = -0.061, p = .026**）。
+**建模含义**：本插件**不实现睾酮**——投入产出比差，且会强化刻板印象。
+
+**[R32] Liu J, Clough SJ, Hutchinson AJ, et al.** MT1 and MT2 Melatonin Receptors:
+A Therapeutic Perspective. *Annu Rev Pharmacol Toxicol*. 2016.
+doi:10.1146/annurev-pharmtox-010814-124742. PMID 26514204.
+取用：褪黑素由**松果体**（及视网膜局部）按**昼夜节律**合成释放，**白天低、夜间高**；
+经 MT1/MT2 两种 GPCR 作用于睡眠与昼夜节律、**情绪障碍**、学习记忆等。
+
+**[R33] Kautz M, Charney DS, Murrough JW.** Neuropeptide Y, resilience, and PTSD therapeutics.
+*Neurosci Lett*. 2017 May 10. doi:10.1016/j.neulet.2016.11.061. PMID 27913193.
+取用：NPY 系统是**应激反应的关键中介**与 PTSD 的潜在治疗靶点；大量前临床证据支持
+NPY 调节应激反应与**焦虑**。
+
+**[R34] Milaneschi Y, Simmons WK, van Rossum EFC, et al.** Depression and obesity:
+evidence of shared biological mechanisms. *Mol Psychiatry*. 2019 Jan.
+doi:10.1038/s41380-018-0017-5. PMID 29453413.
+取用：抑郁与肥胖**双向**相关；共享通路包括 **HPA 轴**、免疫炎症激活、
+能量代谢的神经内分泌调节因子（**leptin**、insulin）与微生物组。
+
+**[R35] Hirschfeld RM.** History and evolution of the monoamine hypothesis of depression.
+*J Clin Psychiatry*. 2000. PMID 10775017.
+取用：单胺假说的历史脉络（仅作背景，未取具体数值）。
+**诚实标注**：本条无 DOI，仅经 esummary 核实题录，摘要未取到。
+
+### 情绪部分未能取得一手文献的主题（不得当作结论）
+
+| 主题 | 状态 |
+|---|---|
+| 甲状腺激素 T3/T4 与抑郁/焦虑 | 检索 3 次均返回贫血、Graves 病管理、病例报告等偏题结果，**未取到对口综述** |
+| 胃饥饿素 ghrelin 与易激惹（「饿怒」） | 命中双相障碍/进食障碍等，**未取到直接证据** |
+| 血管加压素 vasopressin 与社会行为 | 命中「爱的分子基础」、不忠遗传学等，**质量不足，未采用** |
+
+因此 `hunger → stress` 的系数（`max(0, hunger-70)*0.35`）仍是**估算**，
+`pms_load*18`、催产素/NPY 的时间常数同样是**估算**，均未标为文献支撑。
+
+### 情绪部分的「估算」标注
+
+| 位置 | 数值 | 状态 |
+|---|---|---|
+| GCR Hill 半饱和常数 Kd | 0.8 | 形态依据 [R21][R22]（受体饱和），**具体数值是工程取值** |
+| 情绪增益系数 | 1.8 | 工程标定，按「+40 应到『挺开心』档」反推 |
+| 情绪→压力耦合 | 0.55 | 工程标定，使满值 ±100 对应 ∓55 分压力 |
+| 瞬时情绪衰减 | 360 s / 180 s | 体感目标（一句话的影响数分钟内过去），无一手测定 |
+| 欣快/烦躁的合成权重 | 见 engine._affect | **工程映射，非文献系数** |

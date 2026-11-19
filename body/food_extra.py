@@ -140,6 +140,10 @@ _ROWS = [
      ("担担面",)),
     ("RiceNoodles", "米线", "主食", "一碗 500 mL", 500, 465, 25, 62, 10, 3, 0, 0, 60, ("米线",)),
     ("RiceSheetNoodles", "河粉", "主食", "一盘 450 g", 450, 415, 28, 58, 8, 3, 0, 0, 58, ("河粉", "粿条")),
+    # 2026-11-19 补：米粉原先映射到 Rice，又被列入拆解清单，于是「米粉」被模型
+    # 拆成「米饭 + 汤」，逻辑上说得通但显示很怪。现给独立条目，不再送模型拆。
+    ("RiceFlourNoodles", "米粉", "主食", "一碗 500 mL（含汤）", 500, 465, 25, 60, 8, 2, 0, 0, 62,
+     ("米粉", "生榨米粉", "桂林米粉")),
     ("Vermicelli", "粉丝", "主食", "一碗 300 g", 300, 275, 20, 40, 1, 0, 0, 0, 45, ("粉丝", "冬粉")),
     ("RiceCake", "年糕", "主食", "一份 200 g", 200, 150, 6, 45, 4, 1, 0, 0, 80, ("年糕",)),
     ("Mantou", "馒头", "主食", "一个 100 g", 100, 65, 1.0, 45, 7, 1, 0, 0, 85, ("馒头",)),
@@ -447,6 +451,8 @@ _ALIAS_EXTRA = [
     ("皮蛋瘦肉粥", ["PidanCongee"]), ("炒面", ["FriedNoodles"]),
     ("牛肉面", ["BeefNoodles"]), ("热干面", ["HotDryNoodles"]), ("炸酱面", ["ZhajiangNoodles"]),
     ("米线", ["RiceNoodles"]), ("河粉", ["RiceSheetNoodles"]), ("粉丝", ["Vermicelli"]),
+    ("米粉", ["RiceFlourNoodles"]), ("生榨米粉", ["RiceFlourNoodles"]),
+    ("桂林米粉", ["RiceFlourNoodles"]),
     ("年糕", ["RiceCake"]), ("馒头", ["Mantou"]), ("包子", ["PorkBao"]),
     ("饺子", ["PorkDumpling"]), ("水饺", ["PorkDumpling"]), ("虾饺", ["ShrimpDumpling"]),
     ("馄饨", ["Wonton"]), ("云吞", ["Wonton"]), ("烧麦", ["Shaomai"]),
@@ -667,7 +673,10 @@ def install() -> int:
                  and _f.FOODS[keys[0]].label == word)
         if not exact:
             keep.add(word)
-    _f._DISH_WORDS = frozenset(keep)
+    # 2026-11-19：这几个词的条目中文名与词不完全一致（米粉/生榨米粉），
+    # 上面那条规则会把它们继续判成「需要拆解的复合菜」。它们是单一主食，
+    # 再拆反而被模型拆成「米饭 + 汤」——逻辑通但显示怪。这里强制移出拆解清单。
+    _f._DISH_WORDS = frozenset(set(keep) - {"米粉", "生榨米粉", "桂林米粉"})
 
     _f.ALL_FOODS[:] = list(_f.FOODS.values())
     _f.SELECTABLE[:] = [f for f in _f.ALL_FOODS if f.selectable]

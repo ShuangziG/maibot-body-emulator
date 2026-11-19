@@ -169,6 +169,11 @@ class BodyState:
     r_beta1: float = 0.15     # 心脏 β1              [APK: Adrenoceptor]
     r_m2: float = 0.20        # 迷走 M2              [APK: M Receptor]
     r_insulin: float = 0.30   # 胰岛素受体           [APK: Insulin Receptor]
+    # 糖皮质激素受体（GCR）。2026-11-18 新增。
+    # 依据：LIFE.apk 元数据含 Glucocorticoid_receptor / GCR，而本插件此前
+    # 只有 cortisol 配体、没有任何受体靶点，"激素影响情绪"缺最后一环。
+    # 取值由 Hill 方程 n=2 算出，见 engine._endocrine。
+    r_gcr: float = 0.28       # 0..1                 [APK: Glucocorticoid_receptor]
 
     # ---- 体温 ----
     temp: float = 36.8        #                      [APK: Thermometer]
@@ -184,6 +189,18 @@ class BodyState:
     thermal: float = 50.0     # 50 = 舒适            [APK: Cold / Hot]
     depression: float = 2.0   # 累积应激导出         [APK: Depression]
     stress_load: float = 0.0  # 应激累积（抑郁的输入，中间量）
+
+    # ---- 情绪双向轴（2026-11-18 新增）----
+    # 依据：LIFE.apk 症状枚举里 Euphoria 与 Dysphoria 同时存在，
+    # 而本插件此前只有 depression 单向 —— 结构上缺了"正性"那一半，
+    # 因此做不出"开心到飞起"，只能做"低落"。
+    #
+    # mood_valence 是**外部可写**的瞬时情绪场：NLP/对话分析把一次发言判成
+    # 正/负之后写进这里，引擎让它自行衰减回 0（情绪本来就该过去）。
+    # 它只影响 stress 的目标值，不直接钉死 stress，避免覆盖内生调节。
+    mood_valence: float = 0.0   # -100..100（正=愉悦，负=不快）
+    euphoria: float = 0.0       # 欣快 0..100          [APK: Euphoria]
+    dysphoria: float = 0.0      # 心境恶劣 0..100      [APK: Dysphoria]
 
     # ---- 室外环境（2026-11-14 新增）----
     # 由插件定时从 Open-Meteo 抓取，注入引擎。引擎不知道天气怎么来的，

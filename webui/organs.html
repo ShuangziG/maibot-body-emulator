@@ -127,18 +127,36 @@
 
   <div class="lb-err" id="err"><strong>数据异常：</strong><span id="err-text"></span></div>
 
+  <section class="lb-card" id="wave-card" style="margin-bottom:14px">
+    <div class="lb-card-hd"><h2>心电 / 脑电</h2><span class="lb-card-sub" id="wave-note">仿真数据，非医学测量</span></div>
+    <div class="lb-wave-wrap">
+      <div class="lb-wave-label">ECG 心电 <span id="wave-ecg-meta">—</span></div>
+      <canvas class="lb-wave" id="wave-ecg" height="90"></canvas>
+    </div>
+    <div class="lb-wave-wrap" style="margin-top:10px">
+      <div class="lb-wave-label">EEG 脑电 <span id="wave-eeg-meta">—</span></div>
+      <canvas class="lb-wave" id="wave-eeg" height="90"></canvas>
+    </div>
+  </section>
+
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px" id="tabs"></div>
   <div class="lb-grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));margin-bottom:14px" id="groups"></div>
 
-  <section class="lb-card">
-    <div class="lb-card-hd"><h2>食物库</h2><span class="lb-card-sub" id="food-count">—</span></div>
-    <div style="overflow:auto">
+
+  <details class="lb-card" id="food-card">
+    <summary class="lb-card-hd" style="cursor:pointer">
+      <h2>食物库</h2>
+      <span class="lb-card-sub" id="food-count">—</span>
+      <span class="lb-card-sub">点击展开</span>
+    </summary>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 10px" id="food-tabs"></div>
+    <div style="overflow:auto;max-height:560px">
       <table class="lb-table" id="food-table">
         <thead><tr><th>名称</th><th>分组</th><th>份量</th><th>体积 mL</th><th>热量 kcal</th><th>碳水 g</th><th>蛋白 g</th><th>脂肪 g</th><th>钠 mmol</th><th>酒精 g</th><th>咖啡因 mg</th></tr></thead>
         <tbody><tr><td colspan="11"><span class="lb-empty">—</span></td></tr></tbody>
       </table>
     </div>
-  </section>
+  </details>
 
   <section class="lb-card" style="margin-top:14px">
     <div class="lb-card-hd"><h2>三餐候选池</h2><span class="lb-card-sub">引擎按固定随机种子从池里选材</span></div>
@@ -163,12 +181,20 @@
   .lb-kv span:last-child{font-family:var(--lb-font-mono);font-weight:500}
   .lb-pool-title{font-size:12px;font-weight:600;margin-bottom:6px}
   .lb-pool-item{font-size:12px;color:var(--lb-muted);padding:3px 0}
+  .lb-wave-wrap{margin-top:6px}
+  .lb-wave-label{font-size:12px;color:var(--lb-muted);margin-bottom:4px}
+  .lb-wave-label span{color:var(--lb-fg);margin-left:6px}
+  .lb-wave{width:100%;height:90px;display:block;background:var(--lb-soft);border-radius:6px}
+  details.lb-card>summary{list-style:none;display:flex;align-items:baseline;gap:10px;cursor:pointer}
+  details.lb-card>summary::-webkit-details-marker{display:none}
+  details.lb-card>summary::before{content:"\25B8";color:var(--lb-muted);font-size:12px;transition:.15s}
+  details.lb-card[open]>summary::before{content:"\25BE"}
 </style>
 <script>
 (function () {
   'use strict';
 
-  var STATE = { organs: null, foods: null, active: '' };
+  var STATE = { organs: null, foods: null, active: '', foodGroup: '' };
 
   function $(id) { return document.getElementById(id); }
   function txt(id, v) { var el = $(id); if (el) el.textContent = v; }
@@ -230,11 +256,172 @@
     return n.toFixed(Math.abs(n) < 10 ? 3 : 1).replace(/0+$/, '').replace(/\.$/, '');
   }
 
+  // ---- 波形数据池（还原自 2026-11-14 备份，issue #11）----
+  // 一次取 20 秒，前端本地按时间轴滚动播放，不反复请求接口。
+  var WAVE = {
+    ecg: [], eeg: [],
+    ecgHz: 100, eegHz: 200,
+    fetchedAt: 0,
+    fetching: false,
+    failed: false
+  };
+  var WAVE_WINDOW_SEC = 8;
+
+  function waveColors() {
+    var cs = getComputedStyle(document.documentElement);
+    return {
+      ecg: cs.getPropertyValue('--series-3').trim() || '#e74c3c',
+      eeg: cs.getPropertyValue('--series-1').trim() || '#5c6bc0',
+      grid: 'rgba(128,128,128,0.15)'
+    };
+  }
+
+  async function loadWaveforms() {
+    // 并发保护：宿主限制同时只能有 2 个请求。
+    if (WAVE.fetching) return;
+    WAVE.fetching = true;
+    try {
+      var res = await window.maibot.query('waveforms', { seconds: 20 });
+      if (!res || res.success === false) {
+        txt('wave-note', '波形不可用：' + ((res && res.error) || '未知'));
+        return;
+      }
+      var ecg = res.ecg || {};
+      var eeg = res.eeg || {};
+      WAVE.ecg = ecg.points || [];
+      WAVE.eeg = eeg.points || [];
+      WAVE.ecgHz = ecg.hz || 100;
+      WAVE.eegHz = eeg.hz || 200;
+      WAVE.fetchedAt = Date.now();
+      txt('wave-ecg-meta', (ecg.bpm || '?') + ' bpm · RR ' + (ecg.rr_ms || '?') + ' ms · ' + (ecg.hz || '?') + ' Hz');
+      var bands = eeg.bands || {};
+      var stageZh = { awake: '清醒', light: '浅睡', deep: '深睡', rem: 'REM' };
+      txt('wave-eeg-meta', (stageZh[eeg.stage] || eeg.stage || '?') +
+        ' · δ' + (bands.delta != null ? bands.delta.toFixed(2) : '?') +
+        ' θ' + (bands.theta != null ? bands.theta.toFixed(2) : '?') +
+        ' α' + (bands.alpha != null ? bands.alpha.toFixed(2) : '?') +
+        ' β' + (bands.beta != null ? bands.beta.toFixed(2) : '?'));
+      txt('wave-note', res.disclaimer || '仿真波形，非医学数据');
+      WAVE.failed = false;
+    } catch (e) {
+      WAVE.failed = true;
+      txt('wave-note', '波形拉取失败：' + (e && e.message ? e.message : e));
+    } finally {
+      WAVE.fetching = false;
+    }
+  }
+
+  function renderScan(canvasId, pool, sampleHz, color, elapsedSec) {
+    var cv = $(canvasId);
+    if (!cv || !pool || pool.length < 2) return;
+    var ctx = cv.getContext('2d');
+    var dpr = window.devicePixelRatio || 1;
+    var w = cv.clientWidth || 600;
+    var h = cv.clientHeight || 90;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+      cv.width = Math.round(w * dpr);
+      cv.height = Math.round(h * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    var mid = h / 2, amp = h * 0.44;
+    var colors = waveColors();
+    ctx.strokeStyle = colors.grid;
+    ctx.lineWidth = 1;
+    for (var s = 1; s < WAVE_WINDOW_SEC; s++) {
+      var gx = (s / WAVE_WINDOW_SEC) * w;
+      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke();
+    }
+    ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke();
+
+    var n = pool.length;
+    var totalSec = n / sampleHz;
+    var startSec = elapsedSec % Math.max(0.001, totalSec - WAVE_WINDOW_SEC);
+    if (startSec < 0) startSec = 0;
+    var i0 = Math.floor(startSec * sampleHz);
+    var i1 = Math.min(n - 1, Math.floor((startSec + WAVE_WINDOW_SEC) * sampleHz));
+    if (i1 - i0 < 2) return;
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.4;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (var i = i0; i <= i1; i++) {
+      var x = ((i - i0) / (i1 - i0)) * w;
+      var y = mid - pool[i] * amp;
+      if (i === i0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(w - 1, 0); ctx.lineTo(w - 1, h); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  var waveStart = 0;
+  var waveLoopRunning = false;
+
+  function waveLoop(ts) {
+    if (document.hidden || !document.getElementById('wave-ecg')) {
+      waveLoopRunning = false;
+      waveStart = 0;
+      return;
+    }
+    waveLoopRunning = true;
+    if (!waveStart) waveStart = ts;
+    var elapsed = (ts - waveStart) / 1000;
+    var c = waveColors();
+    renderScan('wave-ecg', WAVE.ecg, WAVE.ecgHz, c.ecg, elapsed);
+    renderScan('wave-eeg', WAVE.eeg, WAVE.eegHz, c.eeg, elapsed);
+    if (elapsed > 16 && !WAVE.fetching && !WAVE.failed) {
+      waveStart = ts;
+      loadWaveforms();
+    }
+    requestAnimationFrame(waveLoop);
+  }
+
+  // 2026-11-19：食物库原先一屏 311 行，过于刷屏。改为折叠 + 按分组筛选。
+  function foodGroups(all) {
+    var seen = {}, out = [];
+    (all || []).forEach(function (f) {
+      var g = f.group || '其他';
+      if (!seen[g]) { seen[g] = 0; out.push(g); }
+      seen[g] += 1;
+    });
+    return out.map(function (g) { return { name: g, count: seen[g] }; });
+  }
+
+  function renderFoodTabs() {
+    var box = $('food-tabs');
+    if (!box) return;
+    var all = (STATE.foods && STATE.foods.foods) || [];
+    var list = [{ name: '', count: all.length }].concat(foodGroups(all));
+    box.innerHTML = list.map(function (g) {
+      var on = (g.name === STATE.foodGroup) ? ' on' : '';
+      var label = g.name ? g.name + '（' + g.count + '）' : '全部（' + g.count + '）';
+      return '<button type="button" class="lb-chip' + on + '" data-fg="' + esc(g.name) + '">' + esc(label) + '</button>';
+    }).join('');
+    box.querySelectorAll('[data-fg]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        STATE.foodGroup = btn.getAttribute('data-fg') || '';
+        renderFoodTabs();
+        renderFoods();
+      });
+    });
+  }
+
   function renderFoods() {
     var d = STATE.foods || {};
     var tb = $('food-table') ? $('food-table').querySelector('tbody') : null;
-    var foods = d.foods || [];
-    txt('food-count', '共 ' + (d.count || foods.length) + ' 项');
+    var all = d.foods || [];
+    var foods = STATE.foodGroup
+      ? all.filter(function (f) { return (f.group || '其他') === STATE.foodGroup; })
+      : all;
+    txt('food-count', '共 ' + (d.count || all.length) + ' 项'
+      + (STATE.foodGroup ? '，当前「' + STATE.foodGroup + '」' + foods.length + ' 项' : ''));
     if (tb) {
       tb.innerHTML = foods.map(function (f) {
         return '<tr><td>' + esc(f.label) + (f.selectable ? '' : ' <span class="lb-badge">不可选</span>') + '</td>' +
@@ -282,6 +469,7 @@
       var res = await window.maibot.query('foods', {});
       if (res && res.success === false) { showError(res.error || 'foods 失败'); return; }
       STATE.foods = res || {};
+      renderFoodTabs();
       renderFoods();
     } catch (e) {
       showError('拉取食物库失败：' + (e && e.message ? e.message : e));
@@ -291,10 +479,47 @@
   function boot() {
     var n = $('btn-now'); if (n) n.addEventListener('click', function () { window.maibot.navigate('now', {}); });
     var t = $('btn-timeline'); if (t) t.addEventListener('click', function () { window.maibot.navigate('timeline', {}); });
-    var r = $('btn-refresh'); if (r) r.addEventListener('click', function () { loadOrgans(); loadFoods(); });
-    loadOrgans();
-    loadFoods();
-    setInterval(loadOrgans, 15000);
+
+    // ---- 串行加载 ----
+    // 宿主前端硬限制：所有 maibot.query / action / navigate 加起来，
+    // 同时 pending 的请求数 >= 2 就直接拒绝，报 "Two requests are already running"。
+    // 页面现在有三个查询（organs / foods / waveforms），必须串行，否则第三个必炸。
+    var loading = false;
+
+    async function loadAll() {
+      if (loading) return;
+      loading = true;
+      try {
+        await loadOrgans();
+        await loadFoods();
+        await loadWaveforms();
+      } catch (e) {
+        console.warn('页面加载异常', e);
+      } finally {
+        loading = false;
+      }
+    }
+
+    var r = $('btn-refresh');
+    if (r) r.addEventListener('click', function () { WAVE.failed = false; loadAll(); });
+
+    loadAll();
+
+    setInterval(function () {
+      if (!loading && !document.hidden) loadAll();
+    }, 15000);
+
+    // 动画循环只在这里启动一次。若在 loadWaveforms 成功时也启动，
+    // 每加载一轮就会多一个并行循环，指数增长后撞上并发限制。
+    if (!waveLoopRunning) { requestAnimationFrame(waveLoop); }
+
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden && !waveLoopRunning && WAVE.ecg.length) {
+        waveStart = 0;
+        requestAnimationFrame(waveLoop);
+      }
+    });
+
     window.addEventListener('maibot:context', function (ev) {
       var ctx = ev && ev.detail;
       if (!ctx) return;

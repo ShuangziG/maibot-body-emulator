@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import time
 from collections import deque
@@ -42,13 +43,95 @@ from .body.food import (
     is_plain_food,
     parse_menu,
 )
-from .body.translate import FEELING_LEVELS, drunk_level, eat_phase, phase
+from .body.translate import (NORMAL_BAND, FEELING_LEVELS, drunk_level, eat_phase, phase,
+                               recent_meal_text)
+from .body.nlp import analyze as _nlp_analyze
 from .config import LifeBodyConfig
 from .link import LifeLink
 
-PLUGIN_VERSION = "1.2.4"
+PLUGIN_VERSION = "1.3.0"
 H2S = 3600.0
 SAVE_FILE = "body_state.json"
+
+# 体感冲突校正的注入文本（v1.2.5）。只陈述事实，不写禁止式指令 ——
+# 模型需要知道"胃空但不饿"，不需要被逐条告知"不能说什么"。
+# 早期版本 79 字、含三层语义，实测评估认为会稀释注意力，故压到 15 字。
+CONFLICT_NOTE_TEXT = "【身体】刚消化完，胃空但不饿。"
+
+# ---- 工具可见性（PR #8）----
+# feeding 关闭时，body_eat 的说明书没有用途，不该每次请求都占常驻工具表。
+# 宿主对非 visible 的工具按 deferred 处理：名字与短描述仍会出现在一条
+# <system-reminder> 里（可被 tool_search 发现），但参数 schema 不再进提示词，
+# 实测单次请求省约 427 字符（约 250 token）。
+
+
+def _parse_feeding_enabled(text: str):
+    """从 config.toml 文本里读 [feeding].enabled。
+
+    返回 True / False，读不出时为 None（调用方按「开着」处理）。
+    优先用 tomllib（3.11+），没有则退化成只认该段里 enabled 的轻量解析 ——
+    这里只关心一个布尔值，不值得为它引入依赖。
+    """
+
+    try:
+        import tomllib  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]
+
+    if tomllib is not None:
+        try:
+            data = tomllib.loads(text)
+        except Exception:  # noqa: BLE001 - 配置损坏按未知处理
+            return None
+        section = data.get("feeding")
+        if isinstance(section, dict) and isinstance(section.get("enabled"), bool):
+            return bool(section["enabled"])
+        # 非布尔（例如写成字符串 "false"）视为不可信，交给调用方按「开着」处理，
+        # 不擅自猜制作者意图 —— 宿主也会按默认值把它纠正回来。
+        return None
+
+    in_section = False
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("["):
+            in_section = line.replace(" ", "").lower() == "[feeding]"
+            continue
+        if in_section and "=" in line:
+            key, _, value = line.partition("=")
+            if key.strip().lower() == "enabled":
+                token = value.strip().lower()
+                if token in ("true", "false"):
+                    return token == "true"
+                return None
+    return None
+
+
+def _body_eat_visibility() -> tuple:
+    """返回 (喂食是否开启, 判定依据)。读不到一律按开启算，行为与现状一致。
+
+    为什么读文件而不是读 self.config：@Tool 的 visibility 在**类定义期**求值，
+    那时还没有插件实例与配置对象。宿主首次安装会先生成 config.toml 再热重载，
+    所以重载后能读到；故障场景（文件缺失 / 损坏 / 无该段）全部回退到「可见」。
+    """
+
+    try:
+        path = Path(__file__).with_name("config.toml")
+        if not path.is_file():
+            return True, "无 config.toml"
+        parsed = _parse_feeding_enabled(path.read_text(encoding="utf-8"))
+        if parsed is None:
+            return True, "config.toml 无 [feeding] 段或无法解析"
+        return parsed, "config.toml 已读取"
+    except Exception:  # noqa: BLE001 - 任何异常都按开启处理，不影响本体
+        return True, "读取异常"
+
+
+_FEEDING_ENABLED_AT_IMPORT, _BODY_EAT_VISIBILITY_REASON = _body_eat_visibility()
+# 非 "visible" 即交给宿主按 deferred 处理（宿主只认字符串 "visible"）。
+_BODY_EAT_VISIBILITY = "visible" if _FEEDING_ENABLED_AT_IMPORT else None
+
 
 # 生理波形缓冲区的「超前起点」（秒）。
 # 前端 webui/organs.html 用 WAVE_WINDOW_SEC=8 的窗口显示波形，屏幕右缘是
@@ -76,6 +159,8 @@ VITALS = [
 FEELINGS = [
     ("energy", "精力"), ("hunger", "饱腹"), ("thirst", "水分"),
     ("stress", "压力"), ("pain", "疼痛"), ("depression", "心境"),
+    # 2026-11-18：补上 APK 有的正性情绪一极，否则六行里只有"心境"单向。
+    ("euphoria", "欣快"), ("dysphoria", "烦躁"),
 ]
 
 # 内脏细则分组：(组名, 副标题, [(字段, 中文名, 单位, 小数位)])
@@ -133,7 +218,9 @@ ORGAN_GROUPS = [
     ]),
     ("receptors", "受体占据", "0-1", [
         ("r_alpha1", "血管 α1", "", 3), ("r_beta1", "心脏 β1", "", 3),
-        ("r_m2", "迷走 M2", "", 3), ("r_insulin", "胰岛素受体", "", 3),
+        # 2026-11-19：r_insulin 已从本表移除。引擎全程从不更新该字段，
+        # 它恒为初始值 0.30 —— 把常数当指标显示比不显示更误导。
+        ("r_m2", "迷走 M2", "", 3),
     ]),
     ("thermo", "体温调节", "", [
         ("temp", "核心体温", "℃", 2), ("sweat", "出汗", "0-1", 3),
@@ -230,6 +317,9 @@ class LifeBodyPlugin(MaiBotPlugin):
         self._drink_seen: deque[str] = deque(maxlen=256)
         self._meal_seen: deque[str] = deque(maxlen=256)
         self._last_step_wall = 0.0
+        # 情绪自评（v1.2.5）：上次判定的墙钟时刻，用于防抖
+        self._emotion_last_at = 0.0
+        self._emotion_hits = 0
         self._last_save_wall = 0.0
         self._started_at = 0.0
         self._debt = 0.0
@@ -312,6 +402,14 @@ class LifeBodyPlugin(MaiBotPlugin):
             self._body_sim_day(), _clock(self._s.hour), self._s.hr,
             len(FOODS), "" if _FOOD_EXTRA_ADDED > 0 else "（扩展未装）",
         )
+        # 喂食关闭时 body_eat 不在常驻工具表里（PR #8）。不写这一行，
+        # 用户只会看到"工具没了"，却不知道为什么。
+        if not _FEEDING_ENABLED_AT_IMPORT:
+            self._get_logger().info(
+                "body_eat 不进常驻工具表：聊天喂食已关闭（判定依据：%s）。"
+                "需要它在场时，打开「允许聊天喂食」并重载插件。",
+                _BODY_EAT_VISIBILITY_REASON,
+            )
 
     async def on_unload(self) -> None:
         """停止仿真并落盘。"""
@@ -1114,6 +1212,13 @@ class LifeBodyPlugin(MaiBotPlugin):
             "bac": _r(s.bac, 3),
             "na": _r(s.na, 2),
             "sao2": _r(s.sao2, 1),
+            # v1.2.5：情绪进历史采样，WebUI 才能画趋势曲线。
+            # 之前只采体征，情绪只能看"此刻"的一条横条，看不出起伏。
+            "stress": _r(getattr(s, "stress", 0.0), 1),
+            "depression": _r(getattr(s, "depression", 0.0), 1),
+            "euphoria": _r(getattr(s, "euphoria", 0.0), 1),
+            "dysphoria": _r(getattr(s, "dysphoria", 0.0), 1),
+            "mood_valence": _r(getattr(s, "mood_valence", 0.0), 1),
         }
 
     def _on_event(self, ev: Any) -> None:
@@ -1374,7 +1479,10 @@ class LifeBodyPlugin(MaiBotPlugin):
             span = window * H2S
             now_t = self._s.t
             points = [p for p in self._samples if now_t - float(p.get("t", 0.0)) <= span]
-            keys = ["hr", "sbp", "dbp", "glucose", "temp", "energy", "hunger", "thirst", "gastric", "bac", "na"]
+            keys = ["hr", "sbp", "dbp", "glucose", "temp", "energy", "hunger", "thirst",
+                    "gastric", "bac", "na",
+                    # v1.2.5：情绪序列（供 WebUI 情绪曲线）
+                    "stress", "depression", "euphoria", "dysphoria", "mood_valence"]
             series = {k: [_r(p.get(k, 0.0), 2) for p in points] for k in keys}
             return {
                 "hours": window,
@@ -1737,6 +1845,12 @@ class LifeBodyPlugin(MaiBotPlugin):
             "sleeping": bool(s.sleeping),
             "stress": round(float(getattr(s, "stress", 0.0) or 0.0), 2),
             "depression": round(float(getattr(s, "depression", 0.0) or 0.0), 2),
+            # 2026-11-18 v1.2.5：情绪三件套只读回传。
+            # 此前只能写（adjust_mood）不能读，闭环断了一半 —— 外部写完
+            # valence 拿不到当前状态。只加字段不改已有语义，符合契约。
+            "euphoria": round(float(getattr(s, "euphoria", 0.0) or 0.0), 2),
+            "dysphoria": round(float(getattr(s, "dysphoria", 0.0) or 0.0), 2),
+            "mood_valence": round(float(getattr(s, "mood_valence", 0.0) or 0.0), 2),
         }
 
     @API(name="list_foods", description="只读：食物/饮品词表（含别名），供外部校验词能否解析", version="1", public=True)
@@ -1881,12 +1995,18 @@ class LifeBodyPlugin(MaiBotPlugin):
     @API(name="adjust_mood", description="写入：小幅调整压力/心境（无 mood 字段，映射到 stress/depression）", version="1", public=True)
     async def adjust_mood(self, stress_delta: float = 0.0, stress_add: float = 0.0,
                           depression_delta: float = 0.0, depression_add: float = 0.0,
-                          mood_delta: float = 0.0, label: str = "", reason: str = "",
+                          mood_delta: float = 0.0, valence: float = 0.0,
+                          label: str = "", reason: str = "",
                           **kwargs: Any) -> dict[str, Any]:
         """两份请求的签名都收：厨房用 stress_delta/reason，醉酒用 stress_add/label。
 
-        身体没有 mood 字段，只有 stress（压力）与 depression（累积应激）。
+        身体没有长期 mood 字段，只有 stress（压力）与 depression（累积应激）。
         mood_delta 按「心情好 = 压力降一半」保守映射，且每项夹在 ±20。
+
+        2026-11-18 新增 valence：这是**瞬时**情绪场（-100..100），
+        与 mood_delta 的区别是它会被引擎按 τ=6min（MOOD_TAU=360 s）自衰减回 0，
+        因此适合"这一句话让我有点开心"这种一次性输入，而不是长期心境。
+        NLP / 对话分析接的就是这个口子。
         """
 
         del kwargs
@@ -1895,9 +2015,13 @@ class LifeBodyPlugin(MaiBotPlugin):
 
         def _num(v: Any) -> float:
             try:
-                return float(v)
+                f = float(v)
             except (TypeError, ValueError):
                 return 0.0
+            # 2026-11-18 修：float("nan")/float("inf") 不抛异常，会穿过后面的
+            # min/max 钳位（NaN 被钳成 +100），一句话就能把情绪顶满。
+            # 非有限值一律按 0 处理，等价于"这次请求不生效"。
+            return f if math.isfinite(f) else 0.0
 
         ds = _num(stress_delta) or _num(stress_add)
         dd = _num(depression_delta) or _num(depression_add)
@@ -1907,12 +2031,19 @@ class LifeBodyPlugin(MaiBotPlugin):
         ds = max(-20.0, min(20.0, ds))
         dd = max(-20.0, min(20.0, dd))
 
+        val = _num(valence)
+        val = max(-100.0, min(100.0, val))
+
         s = self._s
         try:
             before_stress = float(getattr(s, "stress", 0.0) or 0.0)
             before_dep = float(getattr(s, "depression", 0.0) or 0.0)
             s.stress = max(0.0, min(100.0, before_stress + ds))
             s.depression = max(0.0, min(100.0, before_dep + dd))
+            if val:
+                # 累加而不是覆盖：一轮对话可能有多个分句各判一次情绪。
+                before_val = float(getattr(s, "mood_valence", 0.0) or 0.0)
+                s.mood_valence = max(-100.0, min(100.0, before_val + val))
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "version": 1, "error": f"{type(exc).__name__}: {exc}"[:200]}
 
@@ -1921,10 +2052,14 @@ class LifeBodyPlugin(MaiBotPlugin):
             "version": 1,
             "stress": round(float(s.stress), 2),
             "depression": round(float(s.depression), 2),
+            "mood_valence": round(float(getattr(s, "mood_valence", 0.0) or 0.0), 2),
+            "euphoria": round(float(getattr(s, "euphoria", 0.0) or 0.0), 2),
+            "dysphoria": round(float(getattr(s, "dysphoria", 0.0) or 0.0), 2),
             "applied": {
                 "stress_delta": round(ds, 2),
                 "depression_delta": round(dd, 2),
                 "mood_delta_mapped": round(dm, 2),
+                "valence": round(val, 2),
             },
             "label": str(label or reason or "")[:80],
         }
@@ -1994,6 +2129,51 @@ class LifeBodyPlugin(MaiBotPlugin):
 
     # ===== 联动：身体状态注入对话 =====
 
+    def _conflict_note(self) -> str:
+        """检测「胃空但不饿」与其他来源描述冲突时，生成一句校正。
+
+        2026-11-19 新增。为什么只动自己：
+          日程插件（麦生活）自己维护 hunger 与 health_note，它的 note 在
+          hunger > 88 时写「有些饿，胃里空空的」。我们改不了别的插件，
+          也不该要求它反向适配，只能在自己注入的这一段里把话说清。
+
+        为什么只在冲突时说话：
+          正常状态下这一段返回空串、不注入 —— 不冲突时补一句「我胃空但不饿」
+          纯属占上下文，还会让模型频繁播报身体。
+
+        判据（三者同时成立才算冲突）：
+          (a) 开关打开；
+          (b) 胃内容物低于 gastric_idle_ml（真的排空了）；
+          (c) 饥饿值低于 hunger_floor（身体并不觉得饿）。
+        反过来「胃空 + 确实饿」是一致的，不校正。
+        """
+
+        cfg = getattr(self.config, "conflict", None)
+        if cfg is None or not bool(getattr(cfg, "enabled", False)):
+            return ""
+
+        s = self._s
+        try:
+            gastric = float(getattr(s, "gastric_volume", 0.0) or 0.0)
+            hunger = float(getattr(s, "hunger", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return ""
+
+        idle_ml = float(getattr(cfg, "gastric_idle_ml", 150.0) or 150.0)
+        floor = float(getattr(cfg, "hunger_floor", 65.0) or 65.0)
+        if gastric > idle_ml or hunger >= floor:
+            return ""
+
+        # 只在「离上一餐够久」时说：刚吃完就说胃空是自相矛盾的。
+        _meal = recent_meal_text(s)
+        if _meal:
+            return ""
+
+        # 只陈述事实，不写禁止式指令：模型需要知道"胃空但不饿"，
+        # 不需要被告知"不能说什么"。79 字的长版会稀释注意力，且与
+        # _body_prompt_note() 结尾那句"说到自己状态时请以此为准"重复。
+        return CONFLICT_NOTE_TEXT
+
     def _body_prompt_note(self) -> str:
         """把此刻的身体压成一两句自然语言，供注入对话上下文。
 
@@ -2014,11 +2194,13 @@ class LifeBodyPlugin(MaiBotPlugin):
         elif s.glucose > 7.8:
             parts.append(f"血糖偏高（{s.glucose:.1f} mmol/L）")
 
-        # 最近一餐：这是最常被问到的一项，3 小时内才说，超过就当没这回事，
-        # 免得半夜还被当成"刚吃完"。用词跟 describe() 保持一致。
+        # 最近一餐：这是最常被问到的一项，超过时限就当没这回事，免得半夜
+        # 还被当成"刚吃完"。2026-11-19 起判定统一走 translate.recent_meal_text，
+        # 与 describe() 用同一个函数，避免两处口径再次分叉。
         since_meal = (s.t - s.last_meal_t) / H2S
-        if getattr(s, "last_meal_items", "") and since_meal <= 3.0:
-            parts.append(f"刚吃了{s.last_meal_items}")
+        _meal = recent_meal_text(s)
+        if _meal:
+            parts.append(_meal)
 
         fasted = since_meal
         if s.hunger > 65:
@@ -2031,6 +2213,17 @@ class LifeBodyPlugin(MaiBotPlugin):
 
         if s.energy < 45:
             parts.append(f"精力不济（{s.energy:.0f}/100）")
+
+        # 情绪：只在偏离正常带时才说。正常时一句"心情平稳"只会占注意力。
+        # 2026-11-19 修：阈值不再各写一套，统一取 translate.NORMAL_BAND；
+        # 且欣快/烦躁改成两个独立 if（原来是 if/elif 只报一个）——
+        # 真实情绪允许"又兴奋又焦躁"，混在一起看比强行二选一更直观。
+        if getattr(s, "euphoria", 0.0) > NORMAL_BAND["euphoria"][1]:
+            parts.append(f"心情很好，有点兴奋（{s.euphoria:.0f}/100）")
+        if getattr(s, "dysphoria", 0.0) > NORMAL_BAND["dysphoria"][1]:
+            parts.append(f"有点烦躁（{s.dysphoria:.0f}/100）")
+        if s.depression > NORMAL_BAND["depression"][1]:
+            parts.append(f"情绪低落（{s.depression:.0f}/100）")
 
         if s.hospital_until > s.t:
             left = (s.hospital_until - s.t) / H2S
@@ -2095,9 +2288,73 @@ class LifeBodyPlugin(MaiBotPlugin):
         return None
 
     @HookHandler(
+        "maisaka.replyer.after_response",
+        name="body_emotion_nlp",
+        description="分析麦麦自己说的话，把情绪写进身体（不消耗 token、不联网）",
+        mode=HookMode.OBSERVE,
+        error_policy=ErrorPolicy.SKIP,
+    )
+    async def on_replyer_emotion(self, **kwargs: Any) -> None:
+        """情绪自评入口（v1.2.5）。
+
+        为什么挂在 replyer.after_response：
+          这是「麦麦自己刚说完一句话」的唯一时机，且载荷里带 response 正文。
+        为什么用 OBSERVE：
+          只读不改，绝不碰回复内容 —— 判定失败也要让她正常说话。
+        为什么异步且带防抖：
+          连续短消息（"嗯""哦"）会在几秒内连着触发，不防抖会把情绪叠爆。
+        """
+        if not self._ready or self._engine is None:
+            return None
+        cfg = getattr(self.config, "emotion", None)
+        if cfg is None or not bool(getattr(cfg, "enabled", False)):
+            return None
+
+        text = str(kwargs.get("response") or "")
+        if not text:
+            return None
+
+        now = time.time()
+        gap = max(0.0, float(getattr(cfg, "cooldown_seconds", 3.0) or 0.0))
+        if now - self._emotion_last_at < gap:
+            return None
+
+        try:
+            r = _nlp_analyze(
+                text,
+                scale=float(getattr(cfg, "scale", 1.0) or 1.0),
+                min_chars=int(getattr(cfg, "min_chars", 4) or 4),
+                max_valence=float(getattr(cfg, "max_valence", 60.0) or 60.0),
+            )
+        except Exception as exc:  # noqa: BLE001 - 判定失败不能影响聊天
+            self._get_logger().debug("情绪判定异常：%s: %s", type(exc).__name__, exc)
+            return None
+
+        self._emotion_last_at = now
+        if not r.get("hit"):
+            return None
+
+        s = self._s
+        try:
+            before = float(getattr(s, "mood_valence", 0.0) or 0.0)
+            after = max(-100.0, min(100.0, before + float(r["valence"])))
+            s.mood_valence = after
+            self._emotion_hits += 1
+            # 2026-11-18 修：第三项原先误传 label（与第一项重复），日志看不出
+            # "哪句话被判成什么"，无法按文档建议复盘判定质量。改为回显原句片段。
+            snippet = " ".join(text.split())[:24]
+            self._get_logger().info(
+                "情绪自评：%s -> valence %+.1f（原句「%s」，累计 %d 次）",
+                r.get("label", "?"), float(r["valence"]), snippet, self._emotion_hits,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._get_logger().debug("情绪写入异常：%s: %s", type(exc).__name__, exc)
+        return None
+
+    @HookHandler(
         "maisaka.planner.before_request",
         name="body_context",
-        description="把当前身体状态注入对话上下文",
+        description="把当前身体状态与体感冲突校正注入对话上下文",
         mode=HookMode.BLOCKING,
         order=HookOrder.LATE,
         error_policy=ErrorPolicy.SKIP,
@@ -2111,12 +2368,21 @@ class LifeBodyPlugin(MaiBotPlugin):
 
         if not self._ready or self._engine is None:
             return None
-        if not self.config.link.enabled or not self.config.link.inject_state:
-            return None
 
-        note = self._body_prompt_note()
-        if not note:
+        # 2026-11-19：两段注入的开关互相独立。
+        #   note  —— 常规体征注入，受 link.enabled 且 link.inject_state 控制；
+        #   fix   —— 体感冲突校正，只受 [conflict].enabled 控制。
+        # 早前这里是一道共同的前置判断，若沿用会让「关掉体征注入」时
+        # 连带关掉冲突校正，而后者恰恰是用来弥补没注入时的信息缺口的。
+        note = ""
+        if self.config.link.enabled and self.config.link.inject_state:
+            note = self._body_prompt_note()
+        fix = self._conflict_note()
+
+        merged = "\n\n".join(x for x in (note, fix) if x)
+        if not merged:
             return None
+        note = merged
 
         items = kwargs.get("items")
         if not isinstance(items, list):
@@ -2175,13 +2441,19 @@ class LifeBodyPlugin(MaiBotPlugin):
 
     @Tool(
         "body_eat",
-        description=("记录一次刚刚发生的吃喝：用户给她点/买/递，"
-                     "或叫她吃、叫她喝时，记一笔"),
+        # 2026-11-19 修（issue #12）：原描述开头是「记录一次刚刚发生的吃喝」，
+        # 把「已经吃完」当成了调用前提。用户说「给你点份外卖」时，模型判定
+        # 「还没发生」而不调用，于是投喂彻底失效（RPC 日志里 body_eat 出现 0 次）。
+        # 现改为「下单即记账」，并点明不必等她说吃完。
+        description=("记录一次投喂：用户给她点/买/递吃喝，或叫她吃、叫她喝时调用。"
+                     "「给你点份外卖」「买了奶茶」都算，下单就记，不必等她吃完"),
         brief_description="记录新的吃喝",
         detailed_description=(
             "把一次真实发生的吃喝落进身体模型：血糖、胃排空、水分都会真的变化。"
-            "只在「吃喝刚刚发生」时调用：用户给她点/买/递，或叫她吃、叫她喝"
-            "（「给你点了外卖」「陪我喝半杯白酒」）。"
+            "在用户表示要给她吃喝的那一刻就调用：点外卖、买了、递给她、叫她吃"
+            "（「给你点了外卖」「给你点份外卖」「陪我喝半杯白酒」）。"
+            "**不必等她说已经吃完** —— 下单与递到手里都算投喂发生，先记上，"
+            "身体会按真实消化过程自己推进。"
             "被问「你吃了什么」「喝水了吗」这类事后询问，只是把已有记录陈述出来，"
             "不要再调本工具——身体里的那件事要么来自日程自主进食，要么来自刚才那次投喂，"
             "已经记过了，再记一次就是凭空多出一份。"
@@ -2201,18 +2473,32 @@ class LifeBodyPlugin(MaiBotPlugin):
                               description="这次吃喝的由来，如「用户点的外卖」",
                               required=False, default=""),
         ],
-        # 常驻可见：见 handle_body_state 上方同一条注释。
-        visibility="visible",
+        # PR #8：feeding 关闭时交给宿主按 deferred 处理 —— 名字与短描述仍可被
+        # tool_search 发现，但参数 schema 不再占每次请求的常驻工具表。
+        # 注意：可见性在类定义期按 config.toml 求值，改完 [feeding] 需重载插件。
+        visibility=_BODY_EAT_VISIBILITY,
     )
     async def handle_body_eat(self, kind: str = "snack", items: str = "",
                               note: str = "", **kwargs: Any) -> dict[str, Any]:
         """把一次吃喝落进身体。"""
 
+        # 2026-11-19 修：原先这里在 trust_private_only 打开时**无条件拒绝**，
+        # 理由是「宿主不提供来源标记」。实测不然：MaiBot 的 @Tool 处理器会收到
+        # session_id / group_id / user_id / platform（同生态插件
+        # xiaocutedog_maibot_private_chat_tool_plus 与 local_message-debounce 都这么判）。
+        # 现按真实来源判定：有 group_id 或会话名含 _group_ 即群聊，否则为私聊
+        # （与主程序一致：无群信息按私聊处理）。
+        gid = str(kwargs.get("group_id") or "").strip()
+        sid = str(kwargs.get("session_id") or kwargs.get("chat_id")
+                  or kwargs.get("stream_id") or "").strip()
+        is_group = bool(gid) or ("_group_" in sid) or sid.startswith("group:")
         del kwargs
-        if self.config.feeding.trust_private_only:
-            # 当前宿主 Tool runner 不向 handler 提供可靠的私聊/群聊标记。
-            # 无法证明来源为私聊时必须拒绝，避免配置开关形同虚设。
-            return {"name": "body_eat", "content": "私聊喂食来源暂时无法验证，已拒绝本次喂食。"}
+        if self.config.feeding.trust_private_only and is_group:
+            return {
+                "name": "body_eat",
+                "content": ("只在私聊里接受投喂：当前是群聊，这次没有记。"
+                            "想让她在群里也能吃，把「仅私聊喂食」关掉即可。"),
+            }
         if not self.config.feeding.enabled:
             return {"name": "body_eat", "content": "当前没有开启聊天喂食。"}
         if not self._ready or self._engine is None:

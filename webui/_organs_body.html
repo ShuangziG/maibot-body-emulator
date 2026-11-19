@@ -20,18 +20,36 @@
 
   <div class="lb-err" id="err"><strong>数据异常：</strong><span id="err-text"></span></div>
 
+  <section class="lb-card" id="wave-card" style="margin-bottom:14px">
+    <div class="lb-card-hd"><h2>心电 / 脑电</h2><span class="lb-card-sub" id="wave-note">仿真数据，非医学测量</span></div>
+    <div class="lb-wave-wrap">
+      <div class="lb-wave-label">ECG 心电 <span id="wave-ecg-meta">—</span></div>
+      <canvas class="lb-wave" id="wave-ecg" height="90"></canvas>
+    </div>
+    <div class="lb-wave-wrap" style="margin-top:10px">
+      <div class="lb-wave-label">EEG 脑电 <span id="wave-eeg-meta">—</span></div>
+      <canvas class="lb-wave" id="wave-eeg" height="90"></canvas>
+    </div>
+  </section>
+
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px" id="tabs"></div>
   <div class="lb-grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));margin-bottom:14px" id="groups"></div>
 
-  <section class="lb-card">
-    <div class="lb-card-hd"><h2>食物库</h2><span class="lb-card-sub" id="food-count">—</span></div>
-    <div style="overflow:auto">
+
+  <details class="lb-card" id="food-card">
+    <summary class="lb-card-hd" style="cursor:pointer">
+      <h2>食物库</h2>
+      <span class="lb-card-sub" id="food-count">—</span>
+      <span class="lb-card-sub">点击展开</span>
+    </summary>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 10px" id="food-tabs"></div>
+    <div style="overflow:auto;max-height:560px">
       <table class="lb-table" id="food-table">
         <thead><tr><th>名称</th><th>分组</th><th>份量</th><th>体积 mL</th><th>热量 kcal</th><th>碳水 g</th><th>蛋白 g</th><th>脂肪 g</th><th>钠 mmol</th><th>酒精 g</th><th>咖啡因 mg</th></tr></thead>
         <tbody><tr><td colspan="11"><span class="lb-empty">—</span></td></tr></tbody>
       </table>
     </div>
-  </section>
+  </details>
 
   <section class="lb-card" style="margin-top:14px">
     <div class="lb-card-hd"><h2>三餐候选池</h2><span class="lb-card-sub">引擎按固定随机种子从池里选材</span></div>
