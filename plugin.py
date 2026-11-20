@@ -49,7 +49,7 @@ from .body.nlp import analyze as _nlp_analyze
 from .config import LifeBodyConfig
 from .link import LifeLink
 
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.3.1-dev"
 H2S = 3600.0
 SAVE_FILE = "body_state.json"
 
