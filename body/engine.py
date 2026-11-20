@@ -2424,8 +2424,11 @@ class BodyEngine:
                                   + j_carb * 0.08 + j_prot * 0.22 + j_fat * 0.45)
 
         # ---- 回肠：PYY / GLP-1 刹车（"回肠刹车"）----
-        if s.ileum_residue > 0.05:
-            s.ileum_residue = max(0.0, s.ileum_residue - dt / H2S * 4.0)
+        # 回肠残渣按原有速率进入结肠，两处使用相同的转运量。
+        # 结肠蓄满时，尚未通过的残渣留在回肠。
+        transit = min(s.ileum_residue, dt / H2S * 4.0, max(0.0, 400.0 - s.colon_residue))
+        s.ileum_residue -= transit
+        s.colon_residue += transit
         pyy_t = clamp(0.10 + 2.40 * clamp(s.ileum_residue / 40.0, 0.0, 1.0), 0.10, 1.60)
         glp1_t = clamp(0.10 + 1.80 * clamp(s.ileum_residue / 40.0, 0.0, 1.0)
                        + 0.90 * clamp((s.glucose - 6.0) / 6.0, 0.0, 1.0), 0.10, 1.60)
@@ -2491,10 +2494,6 @@ class BodyEngine:
             aa_out = s.gut_amino * (1.0 - math.exp(-k_aa * dt))
             s.gut_amino -= aa_out
             s.glycogen = min(GLYCOGEN_MAX, s.glycogen + aa_out * 0.35)
-
-        # ---- 不可消化残渣入结肠 ----
-        s.colon_residue = min(400.0, s.colon_residue
-                              + s.ileum_residue * dt / H2S * 0.5)
 
         # ---- 乙醇：Widmark 分布，零级消除 0.15 g/L/h ----
         if s.bac > 0.0:
