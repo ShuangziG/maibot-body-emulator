@@ -14,6 +14,8 @@ logs/
 *.log.jsonl
 
 # 备份（覆盖各种命名：.bak / .bak_xxx / .bak.xxx / xxx.bak.yyy）
+# 宿主的配置备份目录（config.toml.backup.<时间戳>，不含 .bak 后缀，旧规则匹配不到）
+config_back/
 *.bak
 *.bak*
 *.orig

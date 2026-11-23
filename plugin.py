@@ -29,6 +29,7 @@ from maibot_sdk.types import (
 )
 
 from .body import BodyEngine, BodyState, EventBus, brief, build_html, describe
+from .body.history import build_history_payload
 from .body.translate import feeling_bar_pct, feeling_word
 from .body.food import (
     _FOOD_EXTRA_ADDED,
@@ -49,7 +50,7 @@ from .body.nlp import analyze as _nlp_analyze
 from .config import LifeBodyConfig
 from .link import LifeLink
 
-PLUGIN_VERSION = "1.3.1"
+PLUGIN_VERSION = "1.3.2"
 H2S = 3600.0
 SAVE_FILE = "body_state.json"
 
@@ -377,6 +378,17 @@ ORGAN_GROUPS = [
     ]),
 ]
 
+# webui_history 返回的序列清单。顺序即图例顺序，增删要同步前端与 body/history.py
+# 的预算推算（每点 1 个元素，序列越多能装的点越少，自动换算）。
+HISTORY_SERIES_KEYS = (
+    "hr", "sbp", "dbp", "glucose", "temp", "energy", "hunger", "thirst",
+    "gastric", "bac", "na",
+    # v1.2.5：情绪序列（供 WebUI 情绪曲线）
+    "stress", "depression", "euphoria", "dysphoria", "mood_valence", "mood_tone",
+    # v1.3.1：睡眠深度（0=清醒 1=深睡），与 stages 配合画夜间分期图
+    "sleep_depth",
+)
+
 
 def _r(value: Any, digits: int) -> float:
     """安全取整，非数值一律回落 0。"""
@@ -495,6 +507,7 @@ class LifeBodyPlugin(MaiBotPlugin):
         """启动仿真。"""
 
         cfg = self.config
+        self._migrate_link_provider(cfg)
         self._seed = int(cfg.sim.seed)
         self._engine = BodyEngine(enable_behaviour=True, **self._rescue_kwargs())
         self._engine.rng.seed(self._seed) if hasattr(self._engine, "rng") else None
@@ -583,6 +596,7 @@ class LifeBodyPlugin(MaiBotPlugin):
         """配置热重载：只调整节奏与容量，不重置身体。"""
 
         del scope, config_data, version
+        self._migrate_link_provider(self.config)
         history_limit = self._history_limit(self.config.sim.history_limit)
         if self._samples.maxlen != history_limit:
             self._samples = deque(self._samples, maxlen=history_limit)
@@ -592,6 +606,42 @@ class LifeBodyPlugin(MaiBotPlugin):
 
         # 联动总开关热切换：开则起任务，关则停任务并把注入值归零。
         self._sync_link_mode()
+
+    # ---- v1.3.2：provider 默认值迁移 ----
+    @staticmethod
+    def _ver_tuple(text: str) -> tuple:
+        """把 "1.3.1"/"1.3.1-dev" 这类版本串压成 (1,3,1)，便于比较。"""
+        parts: list[int] = []
+        for chunk in str(text).replace("-", ".").split(".")[:3]:
+            digits = "".join(ch for ch in chunk if ch.isdigit())
+            parts.append(int(digits) if digits else 0)
+        while len(parts) < 3:
+            parts.append(0)
+        return tuple(parts)
+
+    def _migrate_link_provider(self, cfg: Any) -> None:
+        """把旧配置里的 provider="life" 当作「出厂默认」，在内存里按 auto 处理。
+
+        背景：v1.3.1 及更早的 provider 默认值是 life；v1.3.2 改成 auto（自动识别
+        麦生活 / 麦织）。老用户的 config.toml 里写着 §provider = "life"§ —— 那多半
+        不是人选，而是当年生成的默认值。照字面执行的话，「装哪个都能自动认出来」
+        对这些升级过来的用户永远不生效。
+
+        处理：只在 config_version 低于 1.3.2、且 provider 恰为 life 时，于**内存**
+        改成 auto（不写回 config.toml，不动用户文件）；显式选过 weave 的保持原样。
+        """.split("§").join(String.fromCharCode(96))
+        try:
+            ver = str(getattr(getattr(cfg, "plugin", None), "config_version", "") or "")
+            raw = str(getattr(getattr(cfg, "link", None), "provider", "") or "").strip().lower()
+            if raw not in ("life", "麦生活"):
+                return
+            if not ver or self._ver_tuple(ver) >= (1, 3, 2):
+                return
+            cfg.link.provider = "auto"
+            self._get_logger().info(
+                "联动引擎按 auto 处理：旧配置（%s）的 provider=life 视为出厂默认，未改写文件", ver)
+        except Exception as exc:  # noqa: BLE001 - 迁移失败不能拖垮加载
+            self._get_logger().debug("provider 迁移跳过：%s", exc)
 
     def _sync_link_mode(self) -> None:
         """按当前配置决定联动任务是否运行、引擎是否接受外部作息。"""
@@ -885,8 +935,12 @@ class LifeBodyPlugin(MaiBotPlugin):
                 "phase": str(status.get("phase") or ""),
                 "summary": str(status.get("summary") or ""),
                 "last_error": str(status.get("last_error") or ""),
-                # 当前联动的是哪个日程插件，WebUI 据此显示「麦织 / 麦生活」
+                # 当前联动的是哪个日程插件，WebUI 据此显示「麦织 / 麦生活」。
+                # provider 是实际生效值；provider_mode 用来区分「自动识别」与「手填」。
                 "provider": str(status.get("provider") or ""),
+                "provider_mode": str(status.get("provider_mode") or ""),
+                "provider_auto": bool(status.get("provider_auto")),
+                "provider_resolved": bool(status.get("provider_resolved")),
                 "plugin_id": str(status.get("plugin_id") or ""),
                 # v1.3.1：麦织/麦生活的"未来安排、醒来时刻、心情参考、打扰判断"
                 "next_plan": status.get("next_plan"),
@@ -1658,9 +1712,17 @@ class LifeBodyPlugin(MaiBotPlugin):
         except Exception as exc:  # noqa: BLE001 - 宿主只认异常
             return {"success": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
 
-    @API(name="webui_history", description="体征曲线：最近 N 小时的逐分钟采样点", version="1", public=False)
+    @API(name="webui_history", description="体征曲线：窗口内的采样序列（按宿主 JSON 预算降采样）", version="1", public=False)
     async def webui_history(self, hours: int = 12, **kwargs: Any) -> dict[str, Any]:
-        """返回指定小时窗内的采样序列。"""
+        """返回指定小时窗内的采样序列。
+
+        宿主对插件 WebUI API 的返回值有硬上限（≤20000 个 JSON 元素、≤12 层、
+        ≤512 KiB，见宿主 src/plugin_runtime/webui_schema.py）。18 条序列 + 3 个
+        对齐列约 21 元素/点，24 小时窗口就是 1440 点 ≈ 3 万元素 —— 身体连续
+        跑满约 16 小时后本接口必然 502，前端只显示
+        「JSON 超过 20000 个元素」。载荷因此统一交给
+        body.history.build_history_payload 按预算等间隔降采样。
+        """
 
         del kwargs
         if not self._ready:
@@ -1670,24 +1732,12 @@ class LifeBodyPlugin(MaiBotPlugin):
             span = window * H2S
             now_t = self._s.t
             points = [p for p in self._samples if now_t - float(p.get("t", 0.0)) <= span]
-            keys = ["hr", "sbp", "dbp", "glucose", "temp", "energy", "hunger", "thirst",
-                    "gastric", "bac", "na",
-                    # v1.2.5：情绪序列（供 WebUI 情绪曲线）
-                    "stress", "depression", "euphoria", "dysphoria", "mood_valence", "mood_tone",
-                    # v1.3.1：睡眠深度（0=清醒 1=深睡），与 stages 配合画夜间分期图
-                    "sleep_depth"]
-            series = {k: [_r(p.get(k, 0.0), 2) for p in points] for k in keys}
-            return {
-                "hours": window,
-                "count": len(points),
-                "labels": [p.get("clock", "") for p in points],
-                "days": [p.get("day", 1) for p in points],
-                # v1.3.1：分期序列（离散），与 labels 逐点对齐 ——
-                # 睡眠是连续过程，画成图比记成事件有用得多。
-                "stages": [str(p.get("sleep_stage") or "awake") for p in points],
-                "series": series,
-                "now": self._sample_point(),
-            }
+            return build_history_payload(
+                points,
+                HISTORY_SERIES_KEYS,
+                now=self._sample_point(),
+                hours=window,
+            )
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
 

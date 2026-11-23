@@ -62,7 +62,14 @@
     if (!box) return;
     var l = d.link || {};
     box.className = 'lb-linkbar';
+    // v1.3.2：l.provider 现在是「实际生效的引擎」，不再等于配置里那行字。
+    // 配置写 weave 但实际连麦生活时，这里照样显示麦生活，不再骗人。
     var linkName = (l.provider === 'weave') ? '麦织' : '麦生活';
+    // 自动识别时标注来源，便于一眼分辨「自动探到的」与「手填的」。
+    var provTag = '';
+    if (l.provider_auto) {
+      provTag = l.provider_resolved ? '（自动识别）' : '（自动识别中）';
+    }
     var dot = $('link-dot');
     var text = $('link-text');
     var meta = $('link-meta');
@@ -73,7 +80,7 @@
     }
     if (!l.ok) {
       box.className = 'lb-linkbar err';
-      text.textContent = '联动已开启，但取不到' + linkName + '状态';
+      text.textContent = '联动已开启，但取不到' + linkName + '状态' + provTag;
       meta.textContent = (l.last_error || linkName + '可能没在运行').slice(0, 48);
       return;
     }
@@ -88,7 +95,7 @@
     if (l.inject_state) bits.push('状态注入');
     if (l.share_state) bits.push('主动分享');
     if (l.feeding) bits.push('可喂食');
-    text.textContent = '已联动' + linkName + ' · ' + (l.summary || l.phase || '状态同步中');
+    text.textContent = '已联动' + linkName + provTag + ' · ' + (l.summary || l.phase || '状态同步中');
     meta.textContent = bits.join('　');
   }
 
@@ -248,13 +255,18 @@
   }
 
   function renderCycle(d) {
-    // 月经周期关闭时整块隐藏，不留空壳
+    // 月经周期关闭时整块隐藏，不留空壳。
+    // v1.3.2：同时把外层栅格收成一列 —— 只隐藏卡片的话，第二列会空着，
+    // 睡眠卡片被挤在左边、右侧留一大块空白。
     var wrap = $('cycle-card');
+    var grid = $('sleep-cycle-grid');
     if (!d.cycle_enabled) {
       if (wrap) wrap.style.display = 'none';
+      if (grid) grid.style.gridTemplateColumns = '1fr';
       return;
     }
     if (wrap) wrap.style.display = '';
+    if (grid) grid.style.gridTemplateColumns = '1.4fr 1fr';
     var cy = d.cycle || {};
     txt('cy-phase', cy.phase_text || '—');
     txt('cy-day', num(cy.day, 1) + ' / ' + num(cy.length, 0) + ' 天');
@@ -370,6 +382,11 @@
     var grid = css.getPropertyValue('--chart-grid').trim() || 'rgba(120,120,120,.18)';
     var axis = css.getPropertyValue('--chart-axis').trim() || 'rgba(120,120,120,.45)';
 
+    // v1.3.2：刻度文字另起一个颜色变量。原先刻度数字与坐标轴共用
+    // --chart-axis(#c3c2b7)，与浅色背景几乎同色 —— 数值其实一直在画，
+    // 只是看不见。暗色主题下同理（#383835 压在 #1a1a19 上）。
+    var labelInk = css.getPropertyValue('--chart-label').trim() || '#6e6d68';
+
     var zeroBase = !!(opts && opts.zeroBase);
     var leftSeries = series.filter(function (s) { return s.axis !== 'right'; });
     var rightSeries = series.filter(function (s) { return s.axis === 'right'; });
@@ -398,15 +415,17 @@
     ctx.strokeStyle = grid;
     ctx.lineWidth = 1;
     ctx.font = FONT;
-    ctx.fillStyle = axis;
-    for (var i = 0; i <= 3; i++) {
-      var y = padT + ih * i / 3;
+    ctx.fillStyle = labelInk;
+    // 5 条参考线（原为 4 条）：只给 4 档时，两端之间的数值全靠估。
+    var TICKS = 4;
+    for (var i = 0; i <= TICKS; i++) {
+      var y = padT + ih * i / TICKS;
       ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + iw, y); ctx.stroke();
       ctx.textAlign = 'left';
-      ctx.fillText((L.max - (L.max - L.min) * i / 3).toFixed(leftTick), 2, y + 3.5);
+      ctx.fillText((L.max - (L.max - L.min) * i / TICKS).toFixed(leftTick), 2, y + 3.5);
       if (R) {
         ctx.textAlign = 'right';
-        ctx.fillText((R.max - (R.max - R.min) * i / 3).toFixed(rightTick), w - 2, y + 3.5);
+        ctx.fillText((R.max - (R.max - R.min) * i / TICKS).toFixed(rightTick), w - 2, y + 3.5);
       }
     }
     ctx.textAlign = 'left';
@@ -435,7 +454,7 @@
 
     var labels = (opts && opts.labels) || [];
     if (labels.length) {
-      ctx.fillStyle = axis;
+      ctx.fillStyle = labelInk;
       ctx.fillText(labels[0] || '', padL, h - 6);
       var mid = labels[Math.floor(labels.length / 2)] || '';
       var mw = ctx.measureText(mid).width;
@@ -444,6 +463,57 @@
       var lw = ctx.measureText(last).width;
       ctx.fillText(last, padL + iw - lw, h - 6);
     }
+
+    // 留一份本次绘制的几何与数据：悬停读数要靠它把鼠标 x 换算成采样点下标。
+    canvas.__chart = {
+      labels: labels, series: series, L: L, R: R,
+      w: w, h: h, padL: padL, padR: padR, padT: padT, ih: ih, iw: iw
+    };
+  }
+
+  // ---- 曲线悬停读数（v1.3.2）----
+  // 刻度只给 5 档，读不出"这一分钟心率到底多少"。指针落在画布上时
+  // 定位到最近的采样点，把该点所有序列的原值列出来。
+  var _tipEl = null;
+  function chartTip() {
+    if (_tipEl) return _tipEl;
+    _tipEl = document.createElement('div');
+    _tipEl.className = 'lb-chart-tip';
+    document.body.appendChild(_tipEl);
+    return _tipEl;
+  }
+
+  function bindChartHover(canvas) {
+    if (!canvas || canvas.__hoverBound) return;
+    canvas.__hoverBound = true;
+    var tip = chartTip();
+    canvas.addEventListener('mousemove', function (ev) {
+      var st = canvas.__chart;
+      if (!st || !st.labels || !st.labels.length) return;
+      var rect = canvas.getBoundingClientRect();
+      var x = ev.clientX - rect.left;
+      var n = st.labels.length;
+      var k = n <= 1 ? 0 : Math.round((x - st.padL) / st.iw * (n - 1));
+      if (k < 0 || k >= n) { tip.style.display = 'none'; return; }
+      var rows = ['<b>' + esc(st.labels[k] || '') + '</b>'];
+      st.series.forEach(function (s) {
+        var v = (s.data || [])[k];
+        if (!isFinite(v)) return;
+        var digits = (s.digits === undefined ? 1 : s.digits);
+        rows.push('<div><i style="background:' + s.color + '"></i>' +
+          esc(s.name || '') + ' <b>' + Number(v).toFixed(digits) + '</b>' +
+          (s.unit ? ' ' + esc(s.unit) : '') + '</div>');
+      });
+      tip.innerHTML = rows.join('');
+      tip.style.display = 'block';
+      var tw = tip.offsetWidth, th = tip.offsetHeight;
+      var px = ev.clientX + 14, py = ev.clientY + 14;
+      if (px + tw > window.innerWidth - 8) px = ev.clientX - tw - 14;
+      if (py + th > window.innerHeight - 8) py = ev.clientY - th - 14;
+      tip.style.left = px + 'px';
+      tip.style.top = py + 'px';
+    });
+    canvas.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
   }
 
   // ---- 夜间分期图（v1.3.1）----
@@ -455,10 +525,15 @@
   var HYPNO_NAME = ['清醒', 'REM', '浅睡', '深睡'];
 
   function cssColor(name, fallback) {
+    // v1.3.2：这些变量定义在 .lb-root 上，读 documentElement 永远读不到，
+    // 分期图于是退回写死的 fallback，与图例（在 .lb-root 内、读到真变量）配色对不上，
+    // 表现就是「图例有橙色浅睡，图上却找不到」。
     try {
-      var v = getComputedStyle(document.documentElement).getPropertyValue(name);
-      v = (v || '').trim();
-      return v || fallback;
+      var root = document.querySelector('.lb-root') || document.body || document.documentElement;
+      var v = (getComputedStyle(root).getPropertyValue(name) || '').trim();
+      // 嵌套 var(--x,#hex) 不能直接当画布颜色用，遇到就退回兜底值
+      if (!v || v.indexOf('var(') === 0) return fallback;
+      return v;
     } catch (e) { return fallback; }
   }
 
@@ -480,10 +555,10 @@
     ctx.clearRect(0, 0, cssW, cssH);
 
     var col = {
-      awake: cssColor('--lb-muted', '#9a9a94'),
-      rem: cssColor('--series-3', '#8b5cf6'),
-      light: cssColor('--series-2', '#4bb3a5'),
-      deep: cssColor('--series-1', '#2a6fdb'),
+      awake: cssColor('--lb-muted', '#6e6d68'),
+      rem: cssColor('--series-3', '#1baf7a'),
+      light: cssColor('--series-2', '#eb6834'),
+      deep: cssColor('--series-1', '#2a78d6'),
       muted: cssColor('--lb-muted', '#888'),
       hr: '#eb6834',
       grid: cssColor('--lb-border', 'rgba(0,0,0,.12)')
@@ -578,33 +653,51 @@
     ctx.textAlign = 'left';
   }
 
+  // 宿主对插件 API 返回值有硬上限（≤20000 个 JSON 元素），窗口太大时后端会
+  // 等间隔抽点。这里如实报出实际分辨率，避免"曲线变钝了但没人知道为什么"。
+  function renderHistNote(h) {
+    var el = $('hist-note');
+    if (!el) return;
+    var base = '每 60 仿真秒一个采样点';
+    if (!h || !h.sampled) { el.textContent = base; return; }
+    el.textContent = base + ' · 已降采样至 ' + h.count + ' 点（原 ' + h.source_count +
+      ' 点，约 ' + Number(h.stride).toFixed(1) + ' 分钟/点）';
+  }
+
   function renderCharts() {
     var h = STATE.history || {};
     var s = h.series || {};
     var labels = h.labels || [];
     drawChart($('chart-bp'), [
-      { data: s.hr || [], color: '#2a78d6' },
-      { data: s.sbp || [], color: '#eb6834' },
-      { data: s.dbp || [], color: '#1baf7a' }
+      { data: s.hr || [], color: '#2a78d6', name: '心率', unit: 'bpm', digits: 0 },
+      { data: s.sbp || [], color: '#eb6834', name: '收缩压', unit: 'mmHg', digits: 0 },
+      { data: s.dbp || [], color: '#1baf7a', name: '舒张压', unit: 'mmHg', digits: 0 }
     ], { labels: labels, tick: 0 });
     // 血糖走左轴、体温走右轴：两者量纲差约 7 倍，同轴会把血糖压平
+    // 体温轴必须给固定量程（v1.3.2）。原先右轴按数据自身 min~max 自适应，
+    // 而体温在 600 个采样点里只跨 0.10℃，被 12% padding 撑开后再铺满 100px
+    // 画布高度 —— 0.01℃ 的量化台阶变成 8px 跳动，看上去就是锯齿。
+    // 改法和体温计一样：正常 36.3~37.2，取 36.0~38.0 覆盖正常与轻中度发热，
+    // 37℃ 正好落在画面中线。极端体温会顶出边界，比"平滑地看不出异常"更有用。
     drawChart($('chart-meta'), [
-      { data: s.glucose || [], color: '#eda100' },
-      { data: s.temp || [], color: '#6250d6', axis: 'right' }
-    ], { labels: labels, tick: 2, tickRight: 1 });
+      { data: s.glucose || [], color: '#eda100', name: '血糖', unit: 'mmol/L', digits: 2 },
+      { data: s.temp || [], color: '#6250d6', axis: 'right', name: '体温', unit: '℃', digits: 2 }
+    ], { labels: labels, tick: 2, tickRight: 1, rightDomain: [36.0, 38.0] });
     // v1.2.5：情绪曲线。欣快/烦躁/压力 0~100 走左轴；
     // 瞬时情绪效价 -100~+100 走右轴 —— 两者量纲正负不同，必须分轴。
     drawChart($('chart-emotion'), [
-      { data: s.euphoria || [], color: '#1baf7a' },
-      { data: s.dysphoria || [], color: '#eb6834' },
-      { data: s.stress || [], color: '#8f8f8f' },
+      { data: s.euphoria || [], color: '#1baf7a', name: '欣快', digits: 0 },
+      { data: s.dysphoria || [], color: '#eb6834', name: '烦躁', digits: 0 },
+      { data: s.stress || [], color: '#8f8f8f', name: '压力', digits: 0 },
       // v1.3.1：心境底色 4 小时慢变量，与瞬时效价同走右轴（都是 -100~+100 量纲）。
       // 没有它时两次对话之间是 0 直线；有了它，曲线才有"这段时间过得怎么样"的底。
-      { data: s.mood_tone || [], color: '#c98a00', axis: 'right' },
-      { data: s.mood_valence || [], color: '#6250d6', axis: 'right' }
+      { data: s.mood_tone || [], color: '#c98a00', axis: 'right', name: '心境底色', digits: 0 },
+      { data: s.mood_valence || [], color: '#6250d6', axis: 'right', name: '情绪效价', digits: 0 }
     // 左轴固定 0~100（三向体感），右轴固定 -100~+100（瞬时效价）。
     ], { labels: labels, tick: 0, tickRight: 0,
          leftDomain: [0, 100], rightDomain: [-100, 100] });
+    // 三张图都挂上悬停读数；已绑定过的会自己跳过，重复调用无副作用
+    ['chart-bp', 'chart-meta', 'chart-emotion'].forEach(function (id) { bindChartHover($(id)); });
     // 夜间分期图与曲线共用同一份 history，跟着一起重画
     renderHypnogram();
   }
@@ -643,6 +736,7 @@
       var res = await window.maibot.query('history', { hours: 24 });
       if (res && res.success === false) { showError(res.error || 'history 返回失败'); return; }
       STATE.history = res || {};
+      renderHistNote(STATE.history);
       renderCharts();
     } catch (e) {
       showError('拉取体征曲线失败：' + (e && e.message ? e.message : e));

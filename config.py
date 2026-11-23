@@ -16,7 +16,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用插件", "order": 1},
     )
     config_version: str = Field(
-        default="1.3.0",
+        default="1.3.2",
         description="配置版本，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True, "order": 0},
     )
@@ -316,7 +316,11 @@ class RescueConfig(PluginConfigBase):
 
 
 class LinkConfig(PluginConfigBase):
-    """与日程插件（麦生活 / 麦织）联动，关闭时本插件独立运行，启用后需要重启一次 MaiBot 本体生效。"""
+    """与日程插件（麦生活 / 麦织）联动。关闭时本插件独立运行。
+
+    联动对象默认由 auto 自动识别，不必手填 life / weave；启用联动后需要重启一次
+    MaiBot 本体才会真正开始拉取。
+    """
 
     __ui_label__ = "日程联动"
     __ui_icon__ = "link"
@@ -326,17 +330,22 @@ class LinkConfig(PluginConfigBase):
         default=False,
         description=(
             "总开关：开启后才与日程插件（麦生活 / 麦织）联动。关闭时两边互不影响，"
-            "身体按自己的时钟独立运行。默认关闭，避免在没装日程插件时反复调用失败"
+            "身体按自己的时钟独立运行。默认关闭，避免在没装日程插件时白跑联动逻辑"
         ),
         json_schema_extra={"label": "启用联动", "group": "连接", "order": 2},
     )
     provider: str = Field(
-        default="life",
+        default="auto",
         description=(
-            "联动对象的日程引擎：life = 麦生活（mai-life），weave = 麦织（MaiWeave）。"
-            "两者互不兼容，装哪个填哪个；填错时联动会一直失败、身体退回独立运行"
+            "联动对象，一般不用改，保持 auto 即可。\n"
+            "auto（默认）：自动识别——启动后依次探测麦生活与麦织，谁在响应就连谁，"
+            "不必再操心装的是哪一个；两个都装时优先麦生活；一个都没探测到时每 5 分钟重试，"
+            "所以日程插件晚于身体插件启动也能自动接上。\n"
+            "life：只用麦生活（mai-life）；weave：只用麦织（MaiWeave）。\n"
+            "手动填 life/weave 时严格按填写值执行，填错不会被静默切换，"
+            "「麦麦此刻的身体」顶部状态栏会如实显示「取不到状态」而不是假装连上。"
         ),
-        json_schema_extra={"label": "日程引擎（麦织：weave / 麦生活：life）", "group": "连接", "order": 0},
+        json_schema_extra={"label": "日程引擎（默认自动，一般不用改）", "group": "连接", "order": 0},
     )
     sync_activity: bool = Field(
         default=True,
@@ -386,10 +395,12 @@ class LinkConfig(PluginConfigBase):
         ),
         json_schema_extra={"label": "联动轮询间隔（秒）", "group": "连接", "order": 1},
     )
-    # 2026-11-15 删除 host_plugin_id：插件 ID 完全由 provider 决定
+    # 2026-11-15 删除 host_plugin_id：插件 ID 由 provider 决定
     # （life → maibot-community.mai-life，weave → ilworkcn.maiweave），
     # 留一个空的只读输入框只会造成"要和日程引擎一起填吗"的误解。
-    # link.py 仍用 getattr 读取，老配置文件里残留该键不会报错，也仍然兼容。
+    # 2026-11-23：provider=auto 时 ID 改由探测得出（见 link.ensure_provider），
+    # 仍然不需要使用者填。link.py 保留 getattr 读取该键作为人工兜底：
+    # 老配置文件里残留它不会报错，填了则优先于自动探测。
     weather_enabled: bool = Field(
         default=True,
         description=(

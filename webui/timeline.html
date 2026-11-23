@@ -1,6 +1,6 @@
 <style>
-  .lb-root{--lb-bg:var(--maibot-background,#f9f9f7);--lb-surface:var(--maibot-surface,#fcfcfb);--lb-fg:var(--maibot-foreground,#0b0b0b);--lb-muted:var(--maibot-muted,#6e6d68);--lb-soft:var(--maibot-soft,#f1f0ec);--lb-border:var(--maibot-border,rgba(11,11,11,.10));--lb-primary:var(--maibot-primary,#2a78d6);--lb-primary-fg:var(--maibot-primary-foreground,#fff);--lb-danger:var(--maibot-danger,#d03b3b);--lb-radius:var(--maibot-radius,12px);--lb-font-body:var(--maibot-font-body,system-ui,-apple-system,"Segoe UI","Microsoft YaHei UI",sans-serif);--lb-font-mono:var(--maibot-font-mono,ui-monospace,"JetBrains Mono",Consolas,monospace);--series-1:#2a78d6;--series-2:#eb6834;--series-3:#1baf7a;--series-4:#eda100;--series-7:#6250d6;--status-good:#0ca30c;--status-good-ink:#006300;--status-warn:#fab219;--status-crit:#d03b3b;--chart-grid:#e1e0d9;--chart-axis:#c3c2b7;font-family:var(--lb-font-body);color:var(--lb-fg);background:var(--lb-bg);padding:20px 24px 40px;max-width:1440px;margin:0 auto;box-sizing:border-box}
-  :root.dark .lb-root,html.dark .lb-root{--lb-bg:var(--maibot-background,#0d0d0d);--lb-surface:var(--maibot-surface,#1a1a19);--lb-fg:var(--maibot-foreground,#f0efec);--lb-muted:var(--maibot-muted,#9a9890);--lb-soft:var(--maibot-soft,#252523);--lb-border:var(--maibot-border,rgba(255,255,255,.10));--series-1:#3987e5;--series-2:#d95926;--series-3:#199e70;--series-4:#c98500;--series-7:#9085e9;--status-good-ink:#0ca30c;--chart-grid:#2c2c2a;--chart-axis:#383835}
+  .lb-root{--lb-bg:var(--maibot-background,#f9f9f7);--lb-surface:var(--maibot-surface,#fcfcfb);--lb-fg:var(--maibot-foreground,#0b0b0b);--lb-muted:var(--maibot-muted,#6e6d68);--lb-soft:var(--maibot-soft,#f1f0ec);--lb-border:var(--maibot-border,rgba(11,11,11,.10));--lb-primary:var(--maibot-primary,#2a78d6);--lb-primary-fg:var(--maibot-primary-foreground,#fff);--lb-danger:var(--maibot-danger,#d03b3b);--lb-radius:var(--maibot-radius,12px);--lb-font-body:var(--maibot-font-body,system-ui,-apple-system,"Segoe UI","Microsoft YaHei UI",sans-serif);--lb-font-mono:var(--maibot-font-mono,ui-monospace,"JetBrains Mono",Consolas,monospace);--series-1:#2a78d6;--series-2:#eb6834;--series-3:#1baf7a;--series-4:#eda100;--series-7:#6250d6;--status-good:#0ca30c;--status-good-ink:#006300;--status-warn:#fab219;--status-crit:#d03b3b;--chart-grid:#e1e0d9;--chart-axis:#c3c2b7;--chart-label:#6e6d68;font-family:var(--lb-font-body);color:var(--lb-fg);background:var(--lb-bg);padding:20px 24px 40px;max-width:1440px;margin:0 auto;box-sizing:border-box}
+  :root.dark .lb-root,html.dark .lb-root{--lb-bg:var(--maibot-background,#0d0d0d);--lb-surface:var(--maibot-surface,#1a1a19);--lb-fg:var(--maibot-foreground,#f0efec);--lb-muted:var(--maibot-muted,#9a9890);--lb-soft:var(--maibot-soft,#252523);--lb-border:var(--maibot-border,rgba(255,255,255,.10));--series-1:#3987e5;--series-2:#d95926;--series-3:#199e70;--series-4:#c98500;--series-7:#9085e9;--status-good-ink:#0ca30c;--chart-grid:#2c2c2a;--chart-axis:#383835;--chart-label:#9a9890}
   html,body{margin:0;padding:0;background:var(--maibot-background,#f9f9f7)}
   html.dark body,:root.dark body{background:var(--maibot-background,#0d0d0d)}
   .lb-root *{box-sizing:border-box}
@@ -60,6 +60,10 @@
   .lb-chart-legend span{display:inline-flex;align-items:center;gap:5px}
   .lb-dot{width:8px;height:8px;border-radius:2px;display:inline-block}
   canvas.lb-canvas{width:100%;height:130px;display:block}
+  /* 曲线悬停读数（v1.3.2）：刻度只能给 5 档，具体到某一分钟的数要靠它 */
+  .lb-chart-tip{position:fixed;pointer-events:none;z-index:9999;display:none;background:var(--lb-surface);border:1px solid var(--lb-border);border-radius:8px;padding:6px 9px;font-size:11px;line-height:1.65;color:var(--lb-fg);box-shadow:0 4px 14px rgba(0,0,0,.18);white-space:nowrap}
+  .lb-chart-tip i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
+  .lb-chart-tip b{font-weight:600}
   .lb-empty{font-size:12px;color:var(--lb-muted);padding:16px 0;text-align:center}
   .lb-foot{margin-top:18px;font-size:11px;color:var(--lb-muted);line-height:1.7}
   /* 急救 / 住院横幅 */
@@ -87,6 +91,7 @@
   .lb-linkbar-meta{font-size:11px;white-space:nowrap}
   /* ---- 睡眠结构（_now_body.html 用） ---- */
   .lb-sleep-bar{display:flex;height:26px;border-radius:6px;overflow:hidden;background:var(--lb-soft);margin-top:8px}
+
   .lb-sleep-bar span{display:block;height:100%;transition:width .4s ease}
   .lb-sleep-bar span.light{background:var(--series-2)}
   .lb-sleep-bar span.deep{background:var(--series-1)}
@@ -424,7 +429,11 @@
         '</tr>');
     }
     tbody.innerHTML = rows.join('');
-    txt('replay-hint', '显示最近 ' + rows.length + ' 个采样点，最新在前');
+    var hint = '显示最近 ' + rows.length + ' 个采样点，最新在前';
+    if (h.sampled) {
+      hint += '；窗口内已降采样至 ' + h.count + ' 点（约 ' + Number(h.stride).toFixed(1) + ' 分钟/点）';
+    }
+    txt('replay-hint', hint);
   }
 
   async function loadHistory() {

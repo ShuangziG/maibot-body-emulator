@@ -83,6 +83,11 @@ class LifeLink:
         self._last_pull = 0.0
         self._last_meal_key = ""
         self._cache: dict[str, Any] = {}
+        # provider="auto" 的探测结果（v1.3.2）：命中的引擎与插件 ID 一起缓存，
+        # 免得每次拉取都去试一个不存在的插件。
+        self._auto_provider = ""
+        self._auto_plugin = ""
+        self._auto_checked = 0.0
         self._fail_count = 0
         self._last_error = ""
         self._last_ok = 0.0
@@ -96,13 +101,58 @@ class LifeLink:
     def enabled(self) -> bool:
         return bool(self._cfg.enabled)
 
-    def _provider(self) -> str:
-        """联动对象：life（麦生活）/ weave（麦织）。"""
+    def _provider_mode(self) -> str:
+        """配置里写的模式：auto / life / weave（v1.3.2）。"""
 
-        p = str(getattr(self._cfg, "provider", "life") or "life").strip().lower()
+        p = str(getattr(self._cfg, "provider", "auto") or "auto").strip().lower()
+        if p in ("auto", "自动", "any", "detect", "自动识别"):
+            return "auto"
         return "weave" if (p.startswith("weave") or p in ("麦织", "maiweave")) else "life"
 
+    def _provider(self) -> str:
+        """实际生效的联动对象：life（麦生活）/ weave（麦织）。
+
+        auto 模式返回探测结果；尚未探测出结果时按麦生活预期，让原有分支照常运行。
+        注意这里恒不返回 "auto" —— 调用方都是按 life/weave 分派的。
+        """
+
+        mode = self._provider_mode()
+        if mode != "auto":
+            return mode
+        return self._auto_provider or "life"
+
+    async def _probe(self, plugin_id: str, api_name: str) -> bool:
+        """试调一次只看通不通。刻意不走 _call：探测失败不该污染失败计数。"""
+
+        try:
+            result = await self._ctx.api.call(f"{plugin_id}.{api_name}")
+            return result is not None
+        except Exception:  # noqa: BLE001 - 插件没装就是常态，不是错误
+            return False
+
+    async def ensure_provider(self) -> None:
+        """auto 模式：探测出到底该找哪个日程插件（结果缓存）。"""
+
+        if self._provider_mode() != "auto" or self._auto_provider:
+            return
+        now = time.time()
+        # 插件可能是晚于本插件加载的，所以探测失败也要隔一阵再试，不能一次定终身。
+        if self._auto_checked and (now - self._auto_checked) < 300.0:
+            return
+        self._auto_checked = now
+        for provider, plugin_id, api_name in (
+            ("life", LIFE_PLUGIN_ID, "get_life_state"),
+            ("weave", WEAVE_PLUGIN_ID, "get_life_status"),
+        ):
+            if await self._probe(plugin_id, api_name):
+                self._auto_provider = provider
+                self._auto_plugin = plugin_id
+                return
+
     def _plugin_id(self) -> str:
+        # auto 已探明时优先用手探到的 ID（可能不是默认 ID）
+        if self._provider_mode() == "auto" and self._auto_plugin:
+            return self._auto_plugin
         if self._provider() == "weave":
             explicit = str(getattr(self._cfg, "host_plugin_id", "") or "")
             # 填的还是麦生活的默认 ID 就等于没填：切到麦织后不该再往麦生活打。
@@ -132,6 +182,9 @@ class LifeLink:
 
         if not self.enabled:
             return {}
+
+        # auto 模式先确认该找哪个插件，后面所有分派都读这个结果
+        await self.ensure_provider()
 
         now = time.time()
         interval = max(10.0, float(getattr(self._cfg, "interval_seconds", 60.0)))
@@ -581,7 +634,13 @@ class LifeLink:
 
         return {
             "enabled": self.enabled,
+            # provider 保持不变语义：实际生效的引擎（life/weave）
             "provider": self._provider(),
+            # v1.3.2：配置里写的是 auto 还是具体值，以及是否已完成探测。
+            # 面板据此区分「自动识别到的麦生活」与「手填麦织」。
+            "provider_mode": self._provider_mode(),
+            "provider_auto": self._provider_mode() == "auto",
+            "provider_resolved": bool(self._auto_provider) if self._provider_mode() == "auto" else True,
             "plugin_id": self._plugin_id(),
             "sync_activity": bool(getattr(self._cfg, "sync_activity", False)),
             "sync_meal": bool(getattr(self._cfg, "sync_meal", False)),

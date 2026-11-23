@@ -21,7 +21,7 @@
 [![Last Commit](https://img.shields.io/github/last-commit/ShuangziG/maibot-body-emulator?label=Last%20Commit&color=7ba989)](https://github.com/ShuangziG/maibot-body-emulator/commits/main/)
 [![Issues](https://img.shields.io/github/issues/ShuangziG/maibot-body-emulator?label=Issues&color=c58b75)](https://github.com/ShuangziG/maibot-body-emulator/issues)
 
-[下载安装](https://github.com/ShuangziG/maibot-body-emulator/releases/latest) · [使用手册](docs/使用手册.md) · [配置指南](docs/配置指南.md) · [状态 API](docs/只读状态API.md) · [更新日志](CHANGELOG.md)
+[下载安装](https://github.com/ShuangziG/maibot-body-emulator/releases/latest) · [使用手册](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/使用手册.md) · [配置指南](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/配置指南.md) · [状态 API](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/只读状态API.md) · [更新日志](https://github.com/ShuangziG/maibot-body-emulator/blob/main/CHANGELOG.md)
 
 </div>
 
@@ -50,13 +50,18 @@
 
 三个页面都是单文件内联 HTML/CSS/JS，不引用 CDN、不发外部请求，**断网也能正常显示**。
 
+<img src="https://raw.githubusercontent.com/ShuangziG/maibot-body-emulator/main/docs/images/now.png" width="880" alt="麦麦此刻的身体">
+
+图：「麦麦此刻的身体」页面 —— 8 项核心体征、体感条、胃内容物、最近事件，以及近 24 小时曲线与整夜睡眠分期图。
+
+
 ---
 
 ## 二、安装
 
 下载最新 Release，解压到宿主的插件目录，重启 MaiBot 即可。
 
-完整的目录结构、依赖与验证步骤见 **[使用手册 · 安装](docs/使用手册.md)**。
+完整的目录结构、依赖与验证步骤见 **[使用手册 · 安装](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/使用手册.md)**。
 
 ---
 
@@ -82,7 +87,7 @@
 > 「胃里空空的」与身体实际的「不饿」冲突时，我们只在自己注入的提示里补一句校正
 > （可关闭，默认开）。
 
-内分泌与受体逐条列在哪一组、名字对应什么，见 **[内分泌系统总表](docs/内分泌系统总表.md)**。
+内分泌与受体逐条列在哪一组、名字对应什么，见 **[内分泌系统总表](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/内分泌系统总表.md)**。
 
 ---
 
@@ -108,7 +113,7 @@
 `tool_search` 才能发现，参数说明也不再占每次请求的上下文）——省下约 250 token/次，且不影响任何
 其它功能。**改完该项需重载插件**才生效。
 
-参数、示例与注意事项见 **[使用手册 · 怎么跟它互动](docs/使用手册.md)**。
+参数、示例与注意事项见 **[使用手册 · 怎么跟它互动](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/使用手册.md)**。
 
 ---
 
@@ -205,7 +210,7 @@
 ## 九、配置
 
 所有开关都在插件的配置面板里，也可以直接改插件目录下的 `config.toml`（首次加载时按默认值
-自动生成）。完整字段与逐项说明见 **[配置指南](docs/配置指南.md)**。
+自动生成）。完整字段与逐项说明见 **[配置指南](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/配置指南.md)**。
 
 ---
 
@@ -248,7 +253,7 @@
 ## 十二、常见问题与故障排查
 
 插件频繁重载、联动失效、存档异常，以及「怎么省 token」「数据准不准」「要不要装麦生活」
-这类问题，都写在 **[使用手册](docs/使用手册.md)**。
+这类问题，都写在 **[使用手册](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/使用手册.md)**。
 
 ---
 
@@ -256,7 +261,7 @@
 
 对外提供 7 个接口：`drunk_snapshot` / `log_drink` / `log_meal` / `get_state` / `get_clock` /
 `list_foods` / `adjust_mood`，供厨房、醉酒等插件调用。签名、返回结构与单位契约见
-**[只读状态 API](docs/只读状态API.md)**。
+**[只读状态 API](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/只读状态API.md)**。
 
 ---
 
@@ -269,9 +274,9 @@
 | 食物数据 | 312 种食物，份量与营养素按 USDA FoodData Central 与《中国食物成分表（第 6 版）》的常见份量估算。 |
 | 天气数据 | Open-Meteo 公开接口（温度、湿度、风速），城市名自动地理编码。 |
 
-被代码参考过的文献与「哪些是估算」的对照，见 **[REFERENCES.md](REFERENCES.md)**；
-血糖与睡眠的数值核对见 **[血糖与睡眠文献依据](docs/血糖与睡眠文献依据.md)**；
-v1.3.1 的常数校核见 **[文献校核](docs/文献校核_v1.3.1.md)**。
+被代码参考过的文献与「哪些是估算」的对照，见 **[REFERENCES.md](https://github.com/ShuangziG/maibot-body-emulator/blob/main/REFERENCES.md)**；
+血糖与睡眠的数值核对见 **[血糖与睡眠文献依据](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/血糖与睡眠文献依据.md)**；
+v1.3.1 的常数校核见 **[文献校核](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/文献校核_v1.3.1.md)**。
 
 本插件不是医疗器械，也不是教学工具。**所有医疗数据均为模拟，不能用于医学判断和诊断。
 任何健康问题请咨询执业医师。**
@@ -282,14 +287,14 @@ v1.3.1 的常数校核见 **[文献校核](docs/文献校核_v1.3.1.md)**。
 
 | 文档 | 内容 |
 | --- | --- |
-| [更新日志](CHANGELOG.md) | 每个版本改了什么 |
-| [使用手册](docs/使用手册.md) | 安装、互动、故障排查、常见问题 |
-| [配置指南](docs/配置指南.md) | 全部配置项与默认值 |
-| [状态 API](docs/只读状态API.md) | 给其他插件的接口契约 |
-| [内分泌系统总表](docs/内分泌系统总表.md) | 56 条激素、50 个受体的器官归属 |
-| [更新报告 v1.3.1](docs/更新报告_v1.3.1.md) | 本版的改动、验证与边界 |
-| [酸碱与运动通气依据](docs/酸碱与运动通气依据.md) | 为什么这样算（原理推导，普通使用不需要看） |
-| [参考文献](REFERENCES.md) | 实际查阅过的文献与取用内容 |
+| [更新日志](https://github.com/ShuangziG/maibot-body-emulator/blob/main/CHANGELOG.md) | 每个版本改了什么 |
+| [使用手册](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/使用手册.md) | 安装、互动、故障排查、常见问题 |
+| [配置指南](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/配置指南.md) | 全部配置项与默认值 |
+| [状态 API](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/只读状态API.md) | 给其他插件的接口契约 |
+| [内分泌系统总表](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/内分泌系统总表.md) | 56 条激素、50 个受体的器官归属 |
+| [更新报告 v1.3.1](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/更新报告_v1.3.1.md) | 本版的改动、验证与边界 |
+| [酸碱与运动通气依据](https://github.com/ShuangziG/maibot-body-emulator/blob/main/docs/酸碱与运动通气依据.md) | 为什么这样算（原理推导，普通使用不需要看） |
+| [参考文献](https://github.com/ShuangziG/maibot-body-emulator/blob/main/REFERENCES.md) | 实际查阅过的文献与取用内容 |
 
 ---
 

@@ -225,7 +225,11 @@
         '</tr>');
     }
     tbody.innerHTML = rows.join('');
-    txt('replay-hint', '显示最近 ' + rows.length + ' 个采样点，最新在前');
+    var hint = '显示最近 ' + rows.length + ' 个采样点，最新在前';
+    if (h.sampled) {
+      hint += '；窗口内已降采样至 ' + h.count + ' 点（约 ' + Number(h.stride).toFixed(1) + ' 分钟/点）';
+    }
+    txt('replay-hint', hint);
   }
 
   async function loadHistory() {
