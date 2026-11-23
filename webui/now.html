@@ -181,6 +181,17 @@
         <div><div class="lb-vital-label">深睡</div><div class="lb-vital-value" id="sl-deep">0<span class="lb-vital-unit">h</span></div></div>
         <div><div class="lb-vital-label">快速眼动</div><div class="lb-vital-value" id="sl-rem">0<span class="lb-vital-unit">h</span></div></div>
       </div>
+      <div class="lb-hypno-wrap">
+        <div class="lb-hypno-head"><span>夜间分期图</span><span id="sl-hypno-note">—</span></div>
+        <canvas class="lb-hypno" id="sl-hypno"></canvas>
+        <div class="lb-hypno-legend">
+          <span><i class="awake"></i>清醒</span>
+          <span><i class="rem"></i>REM</span>
+          <span><i class="light"></i>浅睡</span>
+          <span><i class="deep"></i>深睡</span>
+          <span><i class="hr"></i>心率</span>
+        </div>
+      </div>
       <div class="lb-gut-row" style="margin-top:10px"><span>睡眠质量</span><b id="sl-quality">—</b></div>
       <div class="lb-gut-row"><span>睡眠债</span><b id="sl-debt">—</b></div>
       <div class="lb-card-sub" id="sl-note" style="margin-top:8px"></div>
@@ -253,7 +264,8 @@
           <span><i class="lb-dot" style="background:#1baf7a"></i>欣快</span>
           <span><i class="lb-dot" style="background:#eb6834"></i>烦躁</span>
           <span><i class="lb-dot" style="background:#8f8f8f"></i>压力</span>
-          <span><i class="lb-dot" style="background:#6250d6"></i>瞬时情绪效价（右轴 -100~+100）</span>
+          <span><i class="lb-dot" style="background:#c98a00"></i>心境底色（右轴，τ=4h，v1.3.1）</span>
+        <span><i class="lb-dot" style="background:#6250d6"></i>瞬时情绪效价（右轴 -100~+100）</span>
         </div>
         <canvas class="lb-canvas" id="chart-emotion" height="260"></canvas>
       </div>
@@ -265,6 +277,23 @@
     数据来自插件后台常驻的生理引擎，页面只读取内存快照，不触发仿真。
   </div>
 </div>
+<style>
+  /* v1.3.1：夜间分期图（多导睡眠图的简化版） */
+  .lb-hypno-wrap{margin-top:12px;border-top:1px dashed var(--lb-border);padding-top:10px}
+  .lb-hypno-head{display:flex;justify-content:space-between;align-items:baseline;
+    font-size:12px;color:var(--lb-muted);margin-bottom:6px;gap:10px}
+  .lb-hypno-head span:last-child{font-family:var(--lb-font-mono);font-size:11px}
+  .lb-hypno{width:100%;height:122px;display:block;background:var(--lb-soft);border-radius:8px}
+  .lb-hypno-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--lb-muted);
+    margin-top:6px;align-items:center}
+  .lb-hypno-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;
+    margin-right:4px;vertical-align:-1px}
+  .lb-hypno-legend i.awake{background:var(--lb-muted);opacity:.35}
+  .lb-hypno-legend i.rem{background:var(--series-3)}
+  .lb-hypno-legend i.light{background:var(--series-2)}
+  .lb-hypno-legend i.deep{background:var(--series-1)}
+  .lb-hypno-legend i.hr{background:#eb6834;border-radius:999px;height:2px;width:14px;vertical-align:2px}
+</style>
 <script>
 (function () {
   'use strict';
@@ -578,7 +607,9 @@
   function renderEvents(d) {
     var ul = $('events');
     if (!ul) return;
-    var items = d.events || [];
+    // v1.3.1：引擎不再为分期切换发事件，但旧存档里仍存着成百上千条。
+    // 界面上统一滤掉 —— 分期改由「夜间分期图」呈现，不占事件列表。
+    var items = (d.events || []).filter(function (e) { return e && e.kind !== 'sleep_stage'; });
     txt('ev-count', '内存中 ' + (d.events_total || items.length) + ' 条');
     if (!items.length) {
       ul.innerHTML = '<li><span class="lb-empty">暂无事件</span></li>';
@@ -711,6 +742,138 @@
     }
   }
 
+  // ---- 夜间分期图（v1.3.1）----
+  // 手机睡眠 App 的那种图：横轴时间，纵轴自上而下 清醒 / REM / 浅睡 / 深睡，
+  // 画成条带，再叠一条心率折线。数据来自 webui_history 的 stages（逐分钟分期）
+  // 与 series.hr —— 分期是**连续过程**，画成图远比记成事件有用（这正是原先把
+  // 时间线刷满的那批事件）。颜色取 CSS 变量，主题切换时重绘自动跟随。
+  var HYPNO_LEVEL = { awake: 0, rem: 1, light: 2, deep: 3 };
+  var HYPNO_NAME = ['清醒', 'REM', '浅睡', '深睡'];
+
+  function cssColor(name, fallback) {
+    try {
+      var v = getComputedStyle(document.documentElement).getPropertyValue(name);
+      v = (v || '').trim();
+      return v || fallback;
+    } catch (e) { return fallback; }
+  }
+
+  function renderHypnogram() {
+    var cv = $('sl-hypno');
+    if (!cv) return;
+    var h = STATE.history || {};
+    var stages = h.stages || [];
+    var hr = (h.series && h.series.hr) || [];
+    var labels = h.labels || [];
+    var note = $('sl-hypno-note');
+    var dpr = window.devicePixelRatio || 1;
+    var cssW = cv.clientWidth || 480;
+    var cssH = 122;
+    cv.width = Math.round(cssW * dpr);
+    cv.height = Math.round(cssH * dpr);
+    var ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    var col = {
+      awake: cssColor('--lb-muted', '#9a9a94'),
+      rem: cssColor('--series-3', '#8b5cf6'),
+      light: cssColor('--series-2', '#4bb3a5'),
+      deep: cssColor('--series-1', '#2a6fdb'),
+      muted: cssColor('--lb-muted', '#888'),
+      hr: '#eb6834',
+      grid: cssColor('--lb-border', 'rgba(0,0,0,.12)')
+    };
+
+    var padL = 34, padR = 8, padT = 6, padB = 16;
+    var iw = Math.max(10, cssW - padL - padR);
+    var ih = Math.max(24, cssH - padT - padB);
+
+    // 找最近一段睡眠：从最后一个非清醒采样往前扩，
+    // 容忍 <= 4 个采样（约 4 分钟）的短暂觉醒 —— 夜里翻个身不该把整夜切成两段。
+    var last = -1;
+    for (var i = stages.length - 1; i >= 0; i--) {
+      if (stages[i] && stages[i] !== 'awake') { last = i; break; }
+    }
+    if (last < 0) {
+      if (note) note.textContent = '最近 ' + (h.hours || 12) + ' 小时没有睡眠记录';
+      ctx.fillStyle = col.muted;
+      ctx.font = '11px sans-serif';
+      ctx.fillText('暂无夜间数据', padL, padT + ih / 2);
+      return;
+    }
+    var start = last;
+    while (start > 0) {
+      if (stages[start - 1] !== 'awake') { start--; continue; }
+      var j = start - 1;
+      while (j >= 0 && stages[j] === 'awake') { j--; }
+      if (j >= 0 && (start - 1 - j) <= 4) { start = j; } else { break; }
+    }
+    var n = last - start + 1;
+    if (note) {
+      var stillSleeping = stages[stages.length - 1] !== 'awake';
+      note.textContent = '共 ' + (n / 60).toFixed(1) + ' 小时 · 入睡 ' + (labels[start] || '') +
+        ' · ' + (stillSleeping ? '仍在睡' : '醒来 ' + (labels[last] || ''));
+    }
+
+    var rowH = ih / 4;
+    ctx.font = '10px sans-serif';
+    for (var L = 0; L < 4; L++) {
+      var yc = padT + rowH * (L + 0.5);
+      ctx.strokeStyle = col.grid;
+      ctx.globalAlpha = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(padL, padT + rowH * L);
+      ctx.lineTo(padL + iw, padT + rowH * L);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = col.muted;
+      ctx.textAlign = 'right';
+      ctx.fillText(HYPNO_NAME[L], padL - 4, yc + 3.5);
+    }
+    ctx.textAlign = 'left';
+
+    // 分期条带：一个采样一段
+    var segW = iw / n;
+    for (var k = 0; k < n; k++) {
+      var st = stages[start + k] || 'awake';
+      var lvl = HYPNO_LEVEL[st];
+      if (lvl === undefined) { lvl = 0; }
+      ctx.fillStyle = col[st] || col.awake;
+      ctx.globalAlpha = (st === 'awake') ? 0.35 : 0.95;
+      ctx.fillRect(padL + segW * k, padT + rowH * lvl + rowH * 0.18,
+                   Math.max(1, segW + 0.4), rowH * 0.64);
+    }
+    ctx.globalAlpha = 1;
+
+    // 心率折线（右轴 45~110 bpm），只覆盖睡眠窗口
+    if (hr.length) {
+      ctx.strokeStyle = col.hr;
+      ctx.globalAlpha = 0.8;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      var started = false;
+      for (var m = 0; m < n; m++) {
+        var v = Number(hr[start + m]);
+        if (!isFinite(v)) { started = false; continue; }
+        var px = padL + iw * (n <= 1 ? 0.5 : (m + 0.5) / n);
+        var t = (Math.max(45, Math.min(110, v)) - 45) / 65;
+        var py = padT + ih - ih * t;
+        if (!started) { ctx.moveTo(px, py); started = true; } else { ctx.lineTo(px, py); }
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // 起止时刻
+    ctx.fillStyle = col.muted;
+    ctx.textAlign = 'left';
+    ctx.fillText(labels[start] || '', padL, cssH - 4);
+    ctx.textAlign = 'right';
+    ctx.fillText(labels[last] || '', padL + iw, cssH - 4);
+    ctx.textAlign = 'left';
+  }
+
   function renderCharts() {
     var h = STATE.history || {};
     var s = h.series || {};
@@ -731,10 +894,15 @@
       { data: s.euphoria || [], color: '#1baf7a' },
       { data: s.dysphoria || [], color: '#eb6834' },
       { data: s.stress || [], color: '#8f8f8f' },
+      // v1.3.1：心境底色 4 小时慢变量，与瞬时效价同走右轴（都是 -100~+100 量纲）。
+      // 没有它时两次对话之间是 0 直线；有了它，曲线才有"这段时间过得怎么样"的底。
+      { data: s.mood_tone || [], color: '#c98a00', axis: 'right' },
       { data: s.mood_valence || [], color: '#6250d6', axis: 'right' }
     // 左轴固定 0~100（三向体感），右轴固定 -100~+100（瞬时效价）。
     ], { labels: labels, tick: 0, tickRight: 0,
          leftDomain: [0, 100], rightDomain: [-100, 100] });
+    // 夜间分期图与曲线共用同一份 history，跟着一起重画
+    renderHypnogram();
   }
 
   async function loadNow() {
@@ -766,7 +934,9 @@
 
   async function loadHistory() {
     try {
-      var res = await window.maibot.query('history', { hours: 12 });
+      // v1.3.1：12h 窗口在晚上会把「昨夜」挤出去，夜间分期图就空了。
+      // 24h 覆盖一个完整昼夜，曲线与分期图共用这一份数据。
+      var res = await window.maibot.query('history', { hours: 24 });
       if (res && res.success === false) { showError(res.error || 'history 返回失败'); return; }
       STATE.history = res || {};
       renderCharts();

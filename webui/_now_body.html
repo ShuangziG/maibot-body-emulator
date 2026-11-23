@@ -74,6 +74,17 @@
         <div><div class="lb-vital-label">深睡</div><div class="lb-vital-value" id="sl-deep">0<span class="lb-vital-unit">h</span></div></div>
         <div><div class="lb-vital-label">快速眼动</div><div class="lb-vital-value" id="sl-rem">0<span class="lb-vital-unit">h</span></div></div>
       </div>
+      <div class="lb-hypno-wrap">
+        <div class="lb-hypno-head"><span>夜间分期图</span><span id="sl-hypno-note">—</span></div>
+        <canvas class="lb-hypno" id="sl-hypno"></canvas>
+        <div class="lb-hypno-legend">
+          <span><i class="awake"></i>清醒</span>
+          <span><i class="rem"></i>REM</span>
+          <span><i class="light"></i>浅睡</span>
+          <span><i class="deep"></i>深睡</span>
+          <span><i class="hr"></i>心率</span>
+        </div>
+      </div>
       <div class="lb-gut-row" style="margin-top:10px"><span>睡眠质量</span><b id="sl-quality">—</b></div>
       <div class="lb-gut-row"><span>睡眠债</span><b id="sl-debt">—</b></div>
       <div class="lb-card-sub" id="sl-note" style="margin-top:8px"></div>
@@ -146,7 +157,8 @@
           <span><i class="lb-dot" style="background:#1baf7a"></i>欣快</span>
           <span><i class="lb-dot" style="background:#eb6834"></i>烦躁</span>
           <span><i class="lb-dot" style="background:#8f8f8f"></i>压力</span>
-          <span><i class="lb-dot" style="background:#6250d6"></i>瞬时情绪效价（右轴 -100~+100）</span>
+          <span><i class="lb-dot" style="background:#c98a00"></i>心境底色（右轴，τ=4h，v1.3.1）</span>
+        <span><i class="lb-dot" style="background:#6250d6"></i>瞬时情绪效价（右轴 -100~+100）</span>
         </div>
         <canvas class="lb-canvas" id="chart-emotion" height="260"></canvas>
       </div>

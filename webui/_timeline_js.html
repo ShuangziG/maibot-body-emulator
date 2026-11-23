@@ -186,7 +186,10 @@
   function renderEvents() {
     var ul = $('events');
     if (!ul) return;
-    var items = (STATE.events && STATE.events.items) || [];
+    // v1.3.1：滤掉分期切换事件（新版本已不再产生；旧存档里可能有很多）。
+    var items = ((STATE.events && STATE.events.items) || []).filter(function (e) {
+      return e && e.kind !== 'sleep_stage';
+    });
     if (!items.length) {
       ul.innerHTML = '<li><span class="lb-empty">这个筛选下没有事件</span></li>';
       return;

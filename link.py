@@ -171,6 +171,12 @@ class LifeLink:
             "hunger": float(state.get("hunger") or 0.0),
             "mood": float(state.get("mood_valence") or 0.0),
             "activity_text": str(state.get("current_activity") or ""),
+            # 形状统一：麦生活没有这几项，显式给 None，插件侧不必按 provider 分支
+            "next_plan": None,
+            "sleep_until": "",
+            "mood_ref": float(state.get("mood_valence") or 0.0),
+            "energy_ref": float(state.get("energy") or 0.0),
+            "behavior": None,
             "ts": now,
         }
         self._cache = norm
@@ -210,6 +216,24 @@ class LifeLink:
 
         activity = WEAVE_ACTIVITY.get(kind, 0.0) if kind else 0.0
 
+        # ---- 2026-11-22 新增：麦织其实还给了这几样，之前没消费 ----
+        # next_plan：未来最近的安排（同结构），用它做"下一顿/下一件事"的预判；
+        # sleep_until：当前这觉预计结束时间，用它决定醒来时刻；
+        # mood / energy：只作**参考**（见下方注释），不写进身体状态；
+        # evaluate_behavior：查询"现在适合不适合普通对话/主动交流"，
+        #   能覆盖 current 为空但实际在睡（道晚安、临时唤醒）的时段。
+        nxt = status.get("next_plan") or None
+        next_plan = None
+        if isinstance(nxt, dict):
+            next_plan = {k: nxt.get(k) for k in
+                         ("id", "title", "kind", "start", "end", "location", "status")}
+        behavior = {}
+        beh = await self._call("evaluate_behavior", behavior="conversation")
+        if isinstance(beh, dict):
+            behavior = {"decision": str(beh.get("decision") or ""),
+                        "reason": str(beh.get("reason") or ""),
+                        "until": str(beh.get("until") or "")}
+
         norm = {
             "sleep": sleep,
             "activity": activity,
@@ -217,8 +241,16 @@ class LifeLink:
             "kind": kind,
             "summary": summary,
             "location": str(status.get("location") or current.get("location") or ""),
-            # 麦织的 energy 是 0~100、mood 是 -5~5，与麦生活的量纲不同。
-            # 量纲不明的字段一律不透传，避免把身体的心率/心境带偏。
+            "next_plan": next_plan,
+            "sleep_until": str(status.get("sleep_until") or ""),
+            "mood_ref": status.get("mood"),
+            "energy_ref": status.get("energy"),
+            "behavior": behavior,
+            # 麦织的 energy 是 0~100；状态里的 mood 按它的文档标 -100~100
+            # （±5 是**单次活动**带来的增量，别把两者搞混 —— 本注释 2026-11-22
+            # 按麦织源码 core/models.py 更正，旧注释误写成 "-5~5"）。
+            # 即便如此仍不透传：身体精力由 ATP 派生、心境底色有自己的驱动，
+            # 直传会让两套心情互相覆盖。
             "energy": 0.0,
             "hunger": 0.0,
             "mood": 0.0,
@@ -499,8 +531,15 @@ class LifeLink:
         if not self.enabled or not bool(getattr(self._cfg, "sync_clock", False)):
             return 0.0
 
-        snap = await self._call("get_environment_snapshot")
-        iso = str((snap or {}).get("iso_time") or "")
+        # 2026-11-22：麦织没有 get_environment_snapshot，但 get_life_status 里
+        # 的 queried_at 就是"它那边的现在"（带时区）。两条路取同一个值即可，
+        # 之前"麦织下无法对齐钟点"的判断是错的。
+        if self._provider() == "weave":
+            st = await self._call("get_life_status")
+            iso = str((st or {}).get("queried_at") or "")
+        else:
+            snap = await self._call("get_environment_snapshot")
+            iso = str((snap or {}).get("iso_time") or "")
         if not iso:
             return 0.0
         try:
@@ -558,4 +597,10 @@ class LifeLink:
             "kind": str(self._cache.get("kind") or ""),
             "summary": str(self._cache.get("summary") or ""),
             "activity": float(self._cache.get("activity") or 0.0),
+            # v1.3.1：麦织/麦生活的"未来安排、醒来时刻、心情参考、打扰判断"
+            "next_plan": self._cache.get("next_plan"),
+            "sleep_until": str(self._cache.get("sleep_until") or ""),
+            "mood_ref": self._cache.get("mood_ref"),
+            "energy_ref": self._cache.get("energy_ref"),
+            "behavior": self._cache.get("behavior"),
         }

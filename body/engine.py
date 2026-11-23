@@ -29,25 +29,51 @@ _tau("o2", 8.0)
 _tau("glucose", 240.0)
 _tau("atp", 60.0)
 _tau("renal", 60.0)
-# 内分泌轴的时间常数不在此处 —— 已迁到 body/endocrine.py 的模块头，
+# 内分泌轴的时间常数不在此处 —— 已迁到 body/endocrine/organs/ 各器官模块，
 # 与各自的激素注册表放在一起（单一来源）。此处若再登记会覆盖同样的值，
 # 看似无害实则制造两处真相。
 _tau("temp", 300.0)
+# 发热阈值（2026-11-22）：体温对**其它系统**的影响只在这个温度以上生效。
+# 正常核心体温在 36.3~37.2 之间随昼夜与睡眠摆动，那是体温自己的事；
+# 若拿这个摆动去驱动心率/CO2/不显性失水，改一处体温标定就会污染全身 ——
+# 而且这些通路都很隐蔽（37.0 的失水阈值曾让 1e-5 的水量差值一路积到尿量）。
+# 37.5℃ = 临床「低热」起点（37.5~38.3，CDC 把 38.0 以上定义为 fever）。
+# 之前取 37.3 是自己拍的，低于文献区间；改成 37.5 后，正常昼夜峰（37.05）
+# 依然不受影响，而 37.6 的轻度发热会开始带动心率 —— 与临床一致。
+FEVER_C = 37.5
+# 睡眠期「整夜缓降」的时间常数（2026-11-22）。核心热惯性是数十分钟尺度，
+# 不能拿 5 分钟的体温时间常数去跟睡眠分期 —— 见 _thermo 里的说明。
+_tau("temp_sleep", 1800.0)
 _tau("affect", 900.0)
 
 # ---- 情绪神经内分泌（2026-11-18 新增）----
-# GCR 的 Hill 参数（GCR_KD / GCR_N）已迁到 body/endocrine.py，
+# GCR 的 Hill 参数（GCR_KD / GCR_N）已迁到 body/endocrine/organs/adrenal.py，
 # 与受体注册表同处（单一来源）。
 # 瞬时情绪场的自衰减时间常数（秒）。2026-11-18 由 900 改 360：
 # 实测 900 s 时连续同向事件会线性叠加到上限（"+30 晚安"反而比
 # "+60 带好吃的"更兴奋），因为上一句还没消退下一句又加上去。
 # 360 s（6 min）下，一句话的影响仍能覆盖几轮对话，但不会无限累积。
-MOOD_TAU = 360.0
+# 2026-11-22 由 360 改 1200：6 分钟太短，一句"你真好"的影响还没轮到下一轮
+# 对话就没了，界面上表现为"只有那一刻有个尖，其余是一条 0 线"。
+# 20 分钟仍能覆盖几轮对话，又不至于让连续同向事件一直叠加（360 那次修正要防的
+# 就是叠加到上限）。
+MOOD_TAU = 1200.0
+# 心境底色的时间常数（秒），4 小时。
+# 为什么要单独一层：瞬时情绪（mood_valence）是为"这一句话"服务的，用完就该散；
+# 而人平时不是一张白纸 —— 睡得好、不痛、精力足时底色偏正，连轴转、痛经、
+# 睡债高时底色偏负。此前没有这一层，于是两次对话之间情绪恒为 0。
+# 4 小时是按"半天的心境"取的：慢到不会被一句话推动，快到一天内能跟着作息走。
+MOOD_TONE_TAU = 14400.0
 # 欣快/烦躁的自身时间常数（秒）。2026-11-18 与 MOOD_TAU 分开：
 # 实测共用一个 τ=900 时，一句"你真好"只让 euphoria 爬到 7.2，
 # 而分档要到 30 才叫"心情不错" —— 等于接上 NLP 也看不出反应。
 # 归一化：当场感受该在 3 分钟内基本到位，而不是 15 分钟。
 EUPH_TAU = 180.0
+# 烦躁的自身时间常数（秒，15 分钟），比欣快慢 5 倍。
+# 依据：差异情绪习惯化研究（Berkeley, 2024，"Letting Go of the Negative,
+# Holding on to the Positive"）—— 正性情绪消退更快、负性情绪更持久。
+# 工程上体现为：同一场不愉快过去后，烦躁还在，欣快已经没了。
+DYSPH_TAU = 900.0
 
 # 糖原储存容量上限（g）。2026-11-16 由 500 提到 800：
 #   文献：骨骼肌糖原约 400~900 g（随训练与饮食大幅波动）+ 肝糖原 100~120 g，
@@ -203,6 +229,9 @@ class BodyEngine:
         # 引擎于是退回自己的 23-7 窗口 —— 麦生活白天说没睡、身体照样在睡。
         self.link_sleep = -1.0
         self.link_activity = 0.0   # 0=静息，1=高强度活动
+        # 2026-11-22：日程插件给出「这觉几点结束」时填这里（0..24）。
+        # -1 = 没给，按内置窗口醒。只在已经睡着时生效 —— 白天不该被它改窗口。
+        self.link_wake_hour = -1.0
         self._link_meal = ""       # 待处理的餐段，由外部日程触发，处理完清空
         # 日程/聊天里点名的具体食物（food key 列表）。为空则按餐段菜谱池随便配一份。
         # 2026-11-11 加：日程写"点了一份生榨米粉配油条外卖"，旧实现只拿到
@@ -302,7 +331,13 @@ class BodyEngine:
     # 睡眠（2026-11-08 新增）
     # ------------------------------------------------------------------
     def _in_sleep_window(self, hour: float) -> bool:
-        a, b = self.sleep_start_hour, self.sleep_end_hour
+        # 窗口两端都带当晚的自然变动（见 _night_window），不再是固定的 23:00–07:00
+        a, b = self._night_window()
+        # 外部（麦织/麦生活）给了"这觉预计几点结束"，且人已经睡着时，以它为准。
+        # 只覆盖起床端：入睡仍按窗口，避免白天的临时小憩把整夜窗口改掉。
+        _wake = float(getattr(self, "link_wake_hour", -1.0))
+        if _wake >= 0.0 and self.s.sleeping:
+            b = _wake
         if a > b:                      # 跨零点窗口（默认 23 -> 7）
             return hour >= a or hour < b
         return a <= hour < b
@@ -310,6 +345,87 @@ class BodyEngine:
     # 一个 NREM-REM 周期约 90 分钟。整夜前半段深睡占比高、后半段 REM 变多，
     # 这是健康成人睡眠结构的普遍规律（PSG 实测）。
     SLEEP_CYCLE_MIN = 90.0
+
+    # ---- 睡眠节律的自然变动（2026-11-22 新增）----
+    # 用户反馈：「晚上睡眠节律是不是有点太规律了」。核对后确认三处都是死值：
+    #   · 窗口固定 23:00–07:00 → 每晚入睡/起床分秒不差；
+    #   · 周期固定 90 分钟；
+    #   · 分期配比只随周期序号线性变化，夜与夜之间完全相同。
+    # 于是七夜的分期图像是同一张图复印的 —— 真实成人不是这样：入睡时刻与起床
+    # 时刻每晚都有几十分钟的分散，NREM-REM 周期在 70~110 分钟之间浮动，
+    # 深睡比例也一夜一个样。
+    # 【诚实标注】下面的幅度是**量级估计**，没有找到能直接给出「夜间入睡/起床
+    # 分散的 SD」的原始文献（检索到的都是"作息不规律对健康的影响"这类）。
+    # 取 ±26min(SD) / ±22min(SD) / 周期 ±12min，是为了让七夜看得出差别，
+    # 又不至于把"作息紊乱"当成常态。需要更保守或更散时改这四个系数即可。
+    #
+    # 实现纪律：**不消耗 self.rng**。那会改变食物选择等既有随机流的抽样顺序，
+    # 把一次「睡眠形状」的调整变成全身轨迹重排，回归也就没法解释了。
+    # 这里用「夜序号 + 盐」的确定性哈希做伪随机：同一夜永远同一样子，
+    # 可复现、可回归、不影响任何其它子系统。
+    SLEEP_ONSET_JITTER_MIN = 36.0    # 入睡时刻 ±36 分钟
+    SLEEP_WAKE_JITTER_MIN = 40.0     # 起床时刻 ±40 分钟（量级估计，未取得原始文献）
+    SLEEP_CYCLE_JITTER_MIN = 12.0    # 周期 90±12 → 78~102 分钟
+    SLEEP_LATE_NIGHT_PROB = 0.18     # 约 1/5 的夜晚熬夜（周末效应）
+    SLEEP_LATE_NIGHT_MIN = 60.0      # 熬夜最多 60 分钟
+
+    # ---- 影响睡眠结构的三个「外来输入」（2026-11-22 新增）----
+    # 咖啡因 [R44]：随机交叉试验（23 人，7 条件）—— 100 mg 即使睡前 4 h 也无显著影响；
+    #   400 mg 在睡前 12 h 内就显著推迟入睡，且越近越糟。故取 150 mg 起效阈值、
+    #   400 mg 对应 +20 分钟，超额部分线性。
+    CAFFEINE_THRESHOLD_MG = 150.0
+    CAFFEINE_FULL_MG = 400.0
+    CAFFEINE_MAX_DELAY_MIN = 20.0
+    # 酒精 [R45]：PSG 研究一致显示「前半夜 REM 被抑制、后半夜反跳」。
+    #   【诚实标注】原文没给出可直接取用的抑制百分比，下面 25%/10% 是量级估计。
+    ALCOHOL_FULL_BAC = 0.5
+    ALCOHOL_REM_SUPPRESS = 0.25
+    ALCOHOL_REM_REBOUND = 0.10
+    # 运动 [R46]：急性运动小幅加深慢波（一项研究 +33%，meta 分析为"小效应"；
+    #   睡前 4~8 h 效果最好，过近反而缩短 SWS）。取 +20%（4~8 h）/ +10%（8~12 h）。
+    EXERCISE_DEEP_GAIN = 0.20
+    EXERCISE_DEEP_GAIN_LATE = 0.10
+    EXERCISE_ONSET_ADV_MIN = 8.0
+
+    @staticmethod
+    def _hash01(a: float, b: float) -> float:
+        """确定性伪随机 0..1：同一 (a, b) 永远同一值，且不占用 rng 流。"""
+        x = math.sin(float(a) * 12.9898 + float(b) * 78.233) * 43758.5453123
+        return x - math.floor(x)
+
+    def _night_index(self) -> int:
+        """当前是第几夜（按仿真钟的午夜分界）。
+
+        用 (t/3600 + clock_offset) // 24，而不是 t//86400 —— 与
+        _body_sim_day / 事件天数同一口径（相位非零时两者不等）。
+        """
+        total_h = self.s.t / H2S + float(getattr(self, "clock_offset", 0.0) or 0.0)
+        return int(total_h // 24.0)
+
+    def _night_window(self) -> tuple:
+        """当晚的（入睡, 起床）时刻——在配置窗口上叠加夜间变动。"""
+        n = self._night_index()
+        on = (float(self.sleep_start_hour)
+              + (self._hash01(n, 11.0) - 0.5) * 2.0 * self.SLEEP_ONSET_JITTER_MIN / 60.0)
+        # 约 1/5 的夜晚熬夜（周末/追剧那种）：只往后推，不提前
+        if self._hash01(n, 71.0) < self.SLEEP_LATE_NIGHT_PROB:
+            on += self.SLEEP_LATE_NIGHT_MIN * self._hash01(n, 73.0) / 60.0
+        off = (float(self.sleep_end_hour)
+               + (self._hash01(n, 23.0) - 0.5) * 2.0 * self.SLEEP_WAKE_JITTER_MIN / 60.0)
+
+        s = self.s
+        # ---- 咖啡因：推迟入睡（阈值 + 线性，见 CAFFEINE_* 注释）----
+        caf = float(getattr(s, "caffeine", 0.0) or 0.0)
+        if caf > self.CAFFEINE_THRESHOLD_MG:
+            frac = clamp((caf - self.CAFFEINE_THRESHOLD_MG)
+                         / max(1.0, self.CAFFEINE_FULL_MG - self.CAFFEINE_THRESHOLD_MG),
+                         0.0, 1.5)
+            on += self.CAFFEINE_MAX_DELAY_MIN * frac / 60.0
+        # ---- 当天运动：入睡略快（4~12 h 内，越近越明显）----
+        since_ex_h = (s.t - float(getattr(s, "last_exercise_t", -1e9))) / H2S
+        if 0.0 <= since_ex_h <= 12.0:
+            on -= self.EXERCISE_ONSET_ADV_MIN * (0.5 if since_ex_h > 8.0 else 1.0) / 60.0
+        return (on % 24.0, off % 24.0)
 
     # ---- 连续睡眠区间（sleep bout）口径 ----
     # 2026-11-16 新增。只有连续睡眠达到 min_sleep_bout_hours（默认 4 小时）
@@ -465,7 +581,9 @@ class BodyEngine:
         # 入睡时间常数受核心体温调制：真实机制是核心体温必须下降约 0.3℃ 才
         # 容易入睡，黄体期基础体温偏高会推迟入睡（0.3~0.5℃ 约推迟 20~40 分钟）。
         # 基准 300 秒（约 5 分钟），体温每高 0.1℃ 增加 60 秒，上限 1200 秒。
-        onset_tau = 300.0 + max(0.0, (s.temp - 36.8)) * 600.0
+        # 2026-11-22：同上，只认发热。正常核心体温的昼夜/睡眠摆动不该改变入睡速度，
+        # 否则睡眠时长会被体温标定牵着走（一个间接耦合，极难排查）。
+        onset_tau = 300.0 + max(0.0, (s.temp - FEVER_C)) * 600.0
         onset_tau = min(1200.0, onset_tau)
         if want_sleep > 0.5 and not was_sleeping:
             # 入睡过程：一阶趋近，到 0.5 判定睡着
@@ -963,8 +1081,35 @@ class BodyEngine:
         s = self.s
         s.stage_elapsed += dt
 
-        cycle_sec = self.SLEEP_CYCLE_MIN * 60.0
+        # 周期长度与分期配比都按「夜 + 周期序号」做确定性浮动（见 SLEEP_*_JITTER）
+        _n = self._night_index()
+        cycle_min = (self.SLEEP_CYCLE_MIN
+                     + (self._hash01(_n * 7.0 + s.stage_index, 37.0) - 0.5)
+                     * 2.0 * self.SLEEP_CYCLE_JITTER_MIN)
+        cycle_sec = cycle_min * 60.0
         light_frac, deep_frac, rem_frac = self.cycle_profile(s.stage_index)
+        # 夜与夜之间的配比差异：深睡、REM 各 ±25%，再归一化
+        deep_frac *= 0.75 + 0.50 * self._hash01(_n * 13.0 + 5.0, 53.0)   # ±25%
+        rem_frac *= 0.75 + 0.50 * self._hash01(_n * 17.0 + 3.0, 61.0)
+        # ---- 酒精：前半夜压 REM、后半夜反跳（[R45]）----
+        _bac = clamp(float(getattr(s, "bac", 0.0) or 0.0) / self.ALCOHOL_FULL_BAC, 0.0, 1.5)
+        if _bac > 0.0:
+            if s.stage_index <= 2:
+                rem_frac *= max(0.05, 1.0 - self.ALCOHOL_REM_SUPPRESS * _bac)
+            else:
+                rem_frac *= 1.0 + self.ALCOHOL_REM_REBOUND * _bac
+        # ---- 当天运动：加深慢波（[R46]，睡前 4~8 h 最佳）----
+        _since_ex = (s.t - float(getattr(s, "last_exercise_t", -1e9))) / H2S
+        if 0.0 <= _since_ex <= 8.0:
+            deep_frac *= 1.0 + self.EXERCISE_DEEP_GAIN
+        elif 8.0 < _since_ex <= 12.0:
+            deep_frac *= 1.0 + self.EXERCISE_DEEP_GAIN_LATE
+
+        _tot = light_frac + deep_frac + rem_frac
+        if _tot > 0.0:
+            light_frac, deep_frac, rem_frac = (light_frac / _tot,
+                                               deep_frac / _tot,
+                                               rem_frac / _tot)
 
         # 月经周期对睡眠结构的影响（真实且显著）：
         #   黄体后期（PMS 期）—— 核心体温升高 0.3~0.5℃ 延迟入睡、深睡减少、
@@ -1015,9 +1160,11 @@ class BodyEngine:
         s.sleep_bout_stage_sec = (float(getattr(s, "sleep_bout_stage_sec", 0.0)) + dt)
 
         if new_stage != s.sleep_stage:
-            self.bus.emit(Event(s.t, "sleep_stage", "debug", "睡眠分期",
-                                {"from": s.sleep_stage, "to": new_stage,
-                                 "cycle": s.stage_index}))
+            # 2026-11-21（v1.3.1）：原先每次分期切换都发一条 debug 事件 ——
+            # 一夜 4~6 个周期、每周期 3~4 次切换，于是时间线里整夜里全是
+            # "睡眠分期"行，把真正要看的事件（进食、排尿、醒来）刷掉了。
+            # 分期本身是**连续量**，该画成图（见 WebUI 的夜间分期条），
+            # 不该当离散事件记录。故此处只推进状态、不发事件。
             s.sleep_stage = new_stage
 
         # 深度跟随阶段，但不硬切（30 秒一阶过渡，避免心率阶跃）
@@ -1697,7 +1844,7 @@ class BodyEngine:
 
         s.symp = symp
         s.para = para
-        # 受体占据已迁到 body/endocrine.py（2026-11-18）。
+        # 受体占据已迁到 body/endocrine/（2026-11-18 拆出，2026-11-21 按器官分科）。
         # 注意传的是局部 symp/para 而非 s.symp —— 后者是动态属性、不进存档。
         endocrine.step_autonomic_receptors(s, symp, para)
 
@@ -1713,8 +1860,14 @@ class BodyEngine:
         # 静息基线随年龄轻微上移：18 岁 60、60 岁 68.4（成人静息 60~100 的偏年轻段）。
         _age = float(getattr(self, "age", 18) or 18)
         hr_rest_base = 60.0 + 0.20 * (_age - 18.0)
+        # 2026-11-22：体温项只保留**发热段**。原先写的是 3.0*(temp-36.8)，
+        # 于是昼夜 0.3℃ 的正常摆动、睡眠期 0.4℃ 的降幅都会被算进心率 ——
+        # 结果是「改睡眠体温标定，血压心率跟着变」，一处标定污染整条链。
+        # 常温段（36.3~37.3）体温对静息心率的真实影响不足 1 bpm，不值得承担这个耦合；
+        # 发热时的心动过速才是必须保留的部分（37.3℃ 以上每度 +3 bpm 的量级）。
+        _fever = max(0.0, s.temp - FEVER_C)
         hr_t = (hr_rest_base + 32.0 * s.r_beta1 - 16.0 * s.r_m2
-                + 3.0 * (s.temp - 36.8) + 8.0 * (s.t3 - 1.0))
+                + 3.0 * _fever + 8.0 * (s.t3 - 1.0))
         if s.exercising:
             # 运动目标按**最大心率百分比**定，不再是固定加数：
             # 慢跑（Zone 2 下限）60% HRmax、快跑 72%。年龄越大 HRmax 越低，
@@ -1821,7 +1974,7 @@ class BodyEngine:
         # 同步阶跃，VA 瞬时到位，不会出现「VCO2 已降而 VA 未降」的碱中毒过冲。
         stress = max(0.0, float(getattr(s, "stress", 0.0) or 0.0))
         vco2_t = 0.255 + ((EX_VCO2_HIGH if _lvl_hi else EX_VCO2_MID) if s.exercising else 0.0)
-        vco2_t += max(0.0, s.temp - 37.0) * 0.06
+        vco2_t += max(0.0, s.temp - FEVER_C) * 0.06
         if s.exercising:
             pco2_set = 38.5
         else:
@@ -1860,7 +2013,7 @@ class BodyEngine:
         va = max((s.tidal - 150.0) * s.rr / 1000.0, 1.0)
         # 静息 VCO2 0.23 L/min（约 2000 kcal/天，RQ 0.85）；运动升到 0.58
         vco2 = 0.255 + (0.35 if s.exercising else 0.0)
-        vco2 += max(0.0, s.temp - 37.0) * 0.06
+        vco2 += max(0.0, s.temp - FEVER_C) * 0.06
         paco2_t = clamp(863.0 * vco2 / va, 25.0, 70.0)
         s.paco2 = approach_tau(s.paco2, paco2_t, dt, 30.0)
 
@@ -2424,9 +2577,15 @@ class BodyEngine:
                                   + j_carb * 0.08 + j_prot * 0.22 + j_fat * 0.45)
 
         # ---- 回肠：PYY / GLP-1 刹车（"回肠刹车"）----
-        # 回肠残渣按原有速率进入结肠，两处使用相同的转运量。
-        # 结肠蓄满时，尚未通过的残渣留在回肠。
-        transit = min(s.ileum_residue, dt / H2S * 4.0, max(0.0, 400.0 - s.colon_residue))
+        # 回肠残渣按原有速率进入结肠，两处使用相同的转运量；
+        # 结肠蓄满（400 g）时，尚未通过的残渣留在回肠。
+        #
+        # 【PR #13 · 作者 lingion】旧实现是两笔互不相干的账：回肠每小时减 4 g，
+        # 结肠却另按 0.5 g/h 往上加 —— 两边不等，残渣既"凭空消失"又"重复累积"。
+        # 缺陷是双向的：小份餐时残渣消失（实测高纤维三餐 4 天内 0 次排便），
+        # 大份餐时结肠虚高（6~8 次/天）。现改为同一转运量，守恒。
+        transit = min(s.ileum_residue, dt / H2S * 4.0,
+                      max(0.0, 400.0 - s.colon_residue))
         s.ileum_residue -= transit
         s.colon_residue += transit
         pyy_t = clamp(0.10 + 2.40 * clamp(s.ileum_residue / 40.0, 0.0, 1.0), 0.10, 1.60)
@@ -2494,6 +2653,13 @@ class BodyEngine:
             aa_out = s.gut_amino * (1.0 - math.exp(-k_aa * dt))
             s.gut_amino -= aa_out
             s.glycogen = min(GLYCOGEN_MAX, s.glycogen + aa_out * 0.35)
+
+        # ---- 不可消化残渣入结肠：已并入上面的 transit（PR #13）----
+        # 旧实现这里还有一笔"按 0.5 g/h 往结肠累加"的账，与回肠侧的 4.0 g/h
+        # 不匹配，是重复累积的根源。已删除；位置保留说明，避免以后有人
+        # "顺手补回来"。
+        # 注：这里刻意不写出旧公式原文 —— digestion_check.py 的静态规则按文本
+        # 匹配，写出来会被当成仍在使用的写法。
 
         # ---- 乙醇：Widmark 分布，零级消除 0.15 g/L/h ----
         if s.bac > 0.0:
@@ -2587,8 +2753,8 @@ class BodyEngine:
         # 三天只喝两次水，与真实生理相去甚远。
         vent = s.rr * s.tidal / 1000.0                      # L/min
         insensible_l_day = 0.40 + 0.40 * (vent / 7.0) + 0.15
-        if s.temp > 37.0:                                    # 发热额外蒸发
-            insensible_l_day += (s.temp - 37.0) * 0.35
+        if s.temp > FEVER_C:                                    # 发热额外蒸发
+            insensible_l_day += (s.temp - FEVER_C) * 0.35
         s.body_water = max(30.0, s.body_water - insensible_l_day * dt / 86400.0)
 
         # 血容量：由总体水线性映射（TBW 42L <-> 5000 mL 血浆）
@@ -2788,7 +2954,7 @@ class BodyEngine:
     def _endocrine(self, dt):
         """内分泌总入口（2026-11-18 拆分后只剩委托）。
 
-        各条轴已迁到 body/endocrine.py，本方法只负责保证：
+        各条轴已迁到 body/endocrine/（按器官分科），本方法只负责保证：
           1) engine.step() 的调用点与顺序不变；
           2) 每条轴变成可独立测试的纯函数；
           3) 激素/受体的元数据集中在 endocrine.HORMONES / RECEPTORS。
@@ -2846,9 +3012,23 @@ class BodyEngine:
         # 旧实现里 sweat 只扣体水、完全不参与体温 —— 于是运动+环境热+黄体期
         # 可以一路叠加到 38 ℃ 被判「低烧」，且没有把它拉回来的机制。
         base -= SWEAT_COOL * clamp(float(getattr(s, "sweat", 0.0) or 0.0), 0.0, 1.0)
-        # 睡眠期核心体温下移 0.3~0.5 ℃，是昼夜曲线的低谷成因之一
-        if s.sleep_depth > 0.0:
-            base -= 0.30 * min(1.0, s.sleep_depth)
+        # ---- 睡眠期体温：拆成「整夜缓降」与「阶段微幅」两项（2026-11-22 修正）----
+        # 旧实现是 base -= 0.30 * min(1, sleep_depth)。问题在于这个 0.30 是按
+        # 「入睡后整夜下移 0.3~0.5℃」定的，输入却是逐阶段跳变的方波
+        # （STAGE_DEPTH：深睡 1.00 / 浅睡 0.55 / REM 0.35），而体温时间常数只有
+        # 5 分钟 —— 于是每进一次深睡就掉 0.10~0.15℃，一夜 22 次分期切换就是
+        # 22 个锯齿。实测（2 日 23:04→3 日 07:00）：深睡段 36.65→36.50 等 5 段
+        # 落差 0.10~0.15℃，整夜极差 0.51℃ 却全由切换造成。
+        #
+        # 真实生理是两件事、两个尺度：
+        #   (a) 整夜 0.3~0.5℃ 的**单调缓降**（热惯性数十分钟级）；
+        #   (b) 周期内 NREM/REM 的核心温差只有 0.02~0.05℃。
+        # 故：慢项只由 sleeping（0/1，经 30 分钟一阶）驱动；阶段项限幅在 ±0.03℃。
+        s.sleep_drive = approach(s.sleep_drive, 1.0 if s.sleeping else 0.0,
+                                 dt, "temp_sleep")
+        base -= 0.35 * s.sleep_drive
+        if s.sleeping and s.sleep_depth > 0.0:
+            base -= clamp(0.05 * (min(1.0, s.sleep_depth) - 0.55), -0.03, 0.03)
         # 酒精：皮肤血管扩张 + 散热增加，核心体温小幅下降（真人 0.2-0.5 ℃）；
         # 咖啡因：腺苷阻断使代谢率略升，体温小幅上行。
         if s.bac > 0.0:
@@ -2870,7 +3050,11 @@ class BodyEngine:
         heat_env = eff_load if float(getattr(s, "env_feels_c", 22.0) or 22.0) > 24.0 else 0.0
         cold_env = eff_load if float(getattr(s, "env_feels_c", 22.0) or 22.0) < 18.0 else 0.0
         s.sweat = clamp((s.temp - 37.5) * 2.0 + 0.55 * heat_env, 0.0, 1.0)
-        s.shiver = clamp((36.5 - s.temp) * 3.0 + 0.60 * cold_env, 0.0, 1.0)
+        # 战栗阈值（2026-11-22，按文献校核）：原为 36.5℃，那是「皮肤温低、觉得冷」
+        # 的体感阈值，不是产热阈值。文献：失温定义为核心 <35.0℃，35.0~36.0 称
+        # "low body temperature"，寒战是 <35℃ 的伴随症状。故取 35.5℃ 作起点
+        # （留 0.5℃ 余量，不把 35.9 的正常偏冷当成寒战）。
+        s.shiver = clamp((35.5 - s.temp) * 3.0 + 0.60 * cold_env, 0.0, 1.0)
         if s.sweat > 0.1:
             lost = s.sweat * 0.8 * dt / 1000.0          # L
             # 34.0 的硬底相当于体重 42 L 的 81%（失水 19%），真人此时已死亡多时。
@@ -2895,6 +3079,26 @@ class BodyEngine:
             s.mood_valence *= math.exp(-dt / MOOD_TAU)
             if abs(s.mood_valence) < 0.05:
                 s.mood_valence = 0.0
+
+        # ---- 心境底色（2026-11-22 新增）----
+        # 只看身体状态，不看对话：睡够、精力足、不痛 → 正；睡债、疼痛、经前、
+        # 极度口渴/饥饿、长期低落 → 负。-6 是"中性偏移"：一具健康的身体大体
+        # 落在 0~+10，而不是把"没出事"当成"很高兴"。
+        # 不把它接回 stress：stress 已经在用它自己的应力累积，再接一层
+        # stress→底色→stress 的回路会让压力出现无依据的自振。
+        tone_t = (10.0 * clamp((s.energy - 65.0) / 30.0, -1.0, 1.0)
+                  + 6.0 * clamp((s.thermal - 50.0) / 25.0, -1.0, 1.0)
+                  + 8.0 * clamp((float(getattr(s, "last_sleep_hours", 0.0)) - 6.5) / 2.5, -1.0, 1.0)
+                  - 9.0 * clamp(float(s.sleep_debt) / 6.0, 0.0, 1.5)
+                  - 0.45 * clamp(float(s.pain), 0.0, 100.0)
+                  - 0.25 * clamp(float(getattr(s, "stress_load", 0.0)), 0.0, 40.0)
+                  - 9.0 * clamp(float(s.pms_load), 0.0, 1.0)
+                  - 0.15 * max(0.0, float(s.thirst) - 60.0)
+                  - 0.20 * max(0.0, float(s.hunger) - 75.0)
+                  - 0.08 * clamp(float(getattr(s, "depression", 0.0)), 0.0, 100.0)
+                  - 6.0)
+        s.mood_tone = approach_tau(s.mood_tone, clamp(tone_t, -60.0, 40.0),
+                                   dt, MOOD_TONE_TAU)
 
         # 饥饿：三通道合成，缺一不可
         #   (a) 时间通道 —— 距上一餐的小时数，指数趋近 100。这是最基础的驱动。
@@ -3096,16 +3300,29 @@ class BodyEngine:
         # 既亢奋又焦躁（混合状态）。
         # 系数 0.8 -> 1.8：实测 0.8 时+45 只到 euphoria 7.2，接上 NLP 也看不见。
         # 1.8 时同样输入可到 80 档附近（上限 100），落在"很兴奋"区间。
+        # 2026-11-22：加入心境底色（mood_tone）。没有它时，两次对话之间的
+        # 正负驱动只剩"内啡肽 + 低压力余量"这一小截，实测 euphoria 贴着 3、
+        # dysphoria 恒为 0 —— 界面就是两条直线。底色给的是"这段时间过得怎么样"。
+        # 2026-11-22 二次校准：只加底色还不够 —— 底色 +5 时 euphoria 只有 6~9，
+        # 画在固定的 0~100 轴上仍是一条贴地线（用户看到的"0 直线"有一半是显示问题）。
+        # 给健康身体一个 15~25 的"正常带"（相当于"心情平稳偏好"），
+        # 事件把正性推到 60~80，睡眠债/疼痛把负性推到 20~40 —— 这才在轴上看得出来。
+        # 这一项随底色浮动（tone 每 +1 抬 0.5，上限 15），不写死常数：
+        # 状态很差时它应该降到 4 以下，而不是让"很抑郁但还有 10 分欣快"并存。
         pos_drive = (max(0.0, s.mood_valence) * 1.8
+                     + max(0.0, s.mood_tone) * 1.2
+                     + clamp(10.0 + s.mood_tone * 0.5, 0.0, 15.0)
                      + clamp(s.endorphin, 0.0, 1.0) * 25.0
                      + max(0.0, 30.0 - s.stress) * 0.25)
         neg_drive = (max(0.0, -s.mood_valence) * 1.8
+                     + max(0.0, -s.mood_tone) * 1.2
                      + max(0.0, s.stress - 50.0) * 0.6
                      + max(0.0, s.pain) * 0.4
                      + clamp(s.pms_load, 0.0, 1.0) * 20.0)
         # 用 EUPH_TAU 而不是 "affect"：当场感受与长期心境分开演进。
         s.euphoria = approach_tau(s.euphoria, clamp(pos_drive, 0.0, 100.0), dt, EUPH_TAU)
-        s.dysphoria = approach_tau(s.dysphoria, clamp(neg_drive, 0.0, 100.0), dt, EUPH_TAU)
+        # 负性比正性持久（见 DYSPH_TAU 的注释）：用各自的时间常数，而不是共用
+        s.dysphoria = approach_tau(s.dysphoria, clamp(neg_drive, 0.0, 100.0), dt, DYSPH_TAU)
 
         # 低落（APK 症状枚举 Depression 的直接对应物）。
         # 口径：持续的应激负荷累积 + 当前压力水平，无社会/睡眠输入 —— 那些量

@@ -49,7 +49,7 @@ from .body.nlp import analyze as _nlp_analyze
 from .config import LifeBodyConfig
 from .link import LifeLink
 
-PLUGIN_VERSION = "1.3.1-dev"
+PLUGIN_VERSION = "1.3.1"
 H2S = 3600.0
 SAVE_FILE = "body_state.json"
 
@@ -163,6 +163,52 @@ FEELINGS = [
     ("euphoria", "欣快"), ("dysphoria", "烦躁"),
 ]
 
+# 每个分组默认展示的「关键字段」（v1.3.1）。
+#
+# 背景：内分泌补齐后内脏页涨到 160 个字段 / 29 组，一屏全是数字 ——
+# 用户的原话是「完善之后感觉刷屏了」。折叠不是藏信息：卡片默认只给每条轴
+# 最该看的那 3~4 个量，其余点「展开其余 N 项」就能看到全量。
+#
+# 选择原则（不是随手挑的）：
+#   · 有诊断意义的最终指标优先（心率、血压、血糖、血钙…），推导量与中间量靠后；
+#   · 激素组给「轴的两端」——释放激素与效应激素各取代表，中间的转化物折叠；
+#   · 受体组默认只给 2~3 个最常关注的，其余折叠（受体是查证用的，不是日常读的）。
+# 未列在此处的分组：字段数 <= COLLAPSE_MIN 时全量展示，不出现展开按钮。
+KEY_FIELDS = {
+    "cardiovascular": ("hr", "sbp", "dbp", "map"),
+    "respiratory": ("rr", "sao2", "paco2"),
+    "metabolic": ("glucose", "insulin", "glycogen", "lactate"),
+    "renal": ("gfr", "urine_total", "bladder", "na", "k", "osmol", "ph"),
+    "digestive": ("gastric_volume", "chyme_carb", "gut_glucose", "duodenum_volume", "bile"),
+    "central": ("crh", "acth", "tsh", "fsh", "lh", "adh"),
+    "thyroid": ("t4", "t3", "calcitonin"),
+    "parathyroid": ("pth", "ca"),
+    "adrenal": ("cortisol", "aldosterone", "adrenaline", "norepinephrine"),
+    "pancreas": ("glucagon", "amylin", "somatostatin"),
+    "gut_hormones": ("gastrin", "cck", "gip", "pyy", "ghrelin"),
+    "kidney_endocrine": ("renin", "ang2", "calcitriol"),
+    "heart": ("anp",),
+    "gonads": ("estrogen", "estradiol", "progesterone", "testosterone"),
+    "pineal_skin": ("melatonin", "vitd25"),
+    "vascular": ("prostacyclin", "thromboxane"),
+    "neural": ("dopamine", "serotonin", "adenosine"),
+    "receptors_central": ("r_crh1", "r_gnrhr", "r_melatonin"),
+    "receptors_thyroid": ("r_tshr", "r_tr", "r_pthr", "r_vdr"),
+    "receptors_adrenal": ("r_gcr", "r_mr", "r_alpha1", "r_beta1", "r_m2"),
+    "receptors_pancreas": ("r_insulin", "r_glucagon"),
+    "receptors_gut": ("r_cck1", "r_h2", "r_glp1"),
+    "receptors_kidney": ("r_at1", "r_avpr2", "r_anp"),
+    "receptors_gonads": ("r_er", "r_pr"),
+    "receptors_neural": ("r_d1", "r_d2", "r_5ht1a", "r_a1"),
+    "receptors_vascular": ("r_ip", "r_tp"),
+    "thermo": ("temp", "sweat", "shiver", "thermal"),
+    "drugs": ("bac", "caffeine"),
+    "behavior": ("hour", "circ", "meals", "health"),
+}
+
+# 字段数不超过这个值的分组不做折叠（全部直接展示）。
+COLLAPSE_MIN = 4
+
 # 内脏细则分组：(组名, 副标题, [(字段, 中文名, 单位, 小数位)])
 ORGAN_GROUPS = [
     ("cardiovascular", "心血管", "泵血与压力", [
@@ -197,17 +243,41 @@ ORGAN_GROUPS = [
         ("ileum_residue", "回肠残余", "g", 2),
         ("bile", "胆汁", "0-1", 2),
     ]),
-    ("endocrine", "内分泌", "激素轴", [
-        ("renin", "肾素", "", 2), ("ang2", "血管紧张素 II", "", 2),
-        ("aldosterone", "醛固酮", "", 2), ("cortisol", "皮质醇", "", 3),
-        ("acth", "ACTH", "", 3), ("adrenaline", "肾上腺素", "", 3),
-        ("tsh", "TSH", "", 3), ("t3", "T3", "", 3), ("adh", "抗利尿激素", "", 3),
+    # ------------------------------------------------------------------
+    # 内分泌（v1.3.1 起按器官分科）
+    # ------------------------------------------------------------------
+    # 旧版这里只有一个 "内分泌 · 激素轴" 分组，9 个字段。v1.3.1 把 APK
+    # HormoneType 枚举补齐后字段涨到 50 余个，再塞一组就没法读了。
+    # 分组口径与 body/endocrine/organs/*.py 一一对应：一个器官一个分组，
+    # 便于「哪条激素不对 -> 直接去改哪个文件」。
+    ("central", "下丘脑 · 垂体", "释放激素与促激素", [
+        ("crh", "CRH", "", 3), ("trh", "TRH", "", 3), ("gnrh", "GnRH", "", 3),
+        ("acth", "ACTH", "", 3), ("tsh", "TSH", "", 3),
+        ("fsh", "FSH", "", 3), ("lh", "LH", "", 3),
+        ("prolactin", "催乳素", "", 3), ("oxytocin", "催产素", "", 3),
+        ("adh", "抗利尿激素", "", 3),
     ]),
-    # 2026-11-11 新增：这 7 个激素一直算在 engine 里（_digest 段），但
-    # ORGAN_GROUPS 是硬编码表，没列出来 WebUI 就看不到 —— 用户反馈
-    # 「看不到小肠腺体的那 7 个激素」即此。字段全部存在于 BodyState，
-    # 这里只是把它们暴露到界面。
-    ("gut_hormones", "肠道腺体", "胃与小肠分泌", [
+    ("thyroid", "甲状腺", "T4/T3 与降钙素", [
+        ("t4", "T4 甲状腺素", "", 3), ("t3", "T3", "", 3),
+        ("calcitonin", "降钙素", "", 3),
+    ]),
+    ("parathyroid", "甲状旁腺 · 钙磷", "PTH 与血钙", [
+        ("pth", "PTH", "", 3), ("ca", "血钙", "mmol/L", 3),
+    ]),
+    ("adrenal", "肾上腺", "皮质与髓质", [
+        ("cortisol", "皮质醇", "", 3), ("aldosterone", "醛固酮", "", 3),
+        ("dhea", "DHEA", "", 3), ("androstenedione", "雄烯二酮", "", 3),
+        ("adrenaline", "肾上腺素", "", 3), ("norepinephrine", "去甲肾上腺素", "", 3),
+    ]),
+    ("pancreas", "胰岛", "糖代谢的内分泌侧", [
+        # 胰岛素不重复列出：它已经在上面的「代谢」组显示（糖代谢闭环的一部分）。
+        # 同一字段在两个分组各显示一次，用户会以为是两个不同的量。
+        ("glucagon", "胰高血糖素", "", 3),
+        ("amylin", "淀粉素", "", 3), ("somatostatin", "生长抑素", "", 3),
+    ]),
+    # 这 7 条一直算在 engine._digest 里；ORGAN_GROUPS 是硬编码表，
+    # 不列出来 WebUI 就看不到（2026-11-11 用户反馈「看不到小肠腺体的激素」即此）。
+    ("gut_hormones", "胃肠腺体", "胃与小肠分泌", [
         ("gastrin", "胃泌素", "G 细胞·蛋白", 3),
         ("secretin", "促胰液素", "S 细胞·酸", 3),
         ("cck", "缩胆囊素", "I 细胞·脂肪", 3),
@@ -215,12 +285,83 @@ ORGAN_GROUPS = [
         ("pyy", "酪酪肽 PYY", "回肠·饱腹刹车", 3),
         ("glp1", "胰高血糖素样肽-1", "回肠·饱腹", 3),
         ("ghrelin", "胃饥饿素", "胃底·促食欲", 3),
+        ("neurotensin", "神经降压素", "回肠·脂肪", 3),
+        ("histamine", "组胺", "ECL·胃泌素驱动", 3),
     ]),
-    ("receptors", "受体占据", "0-1", [
-        ("r_alpha1", "血管 α1", "", 3), ("r_beta1", "心脏 β1", "", 3),
-        # 2026-11-19：r_insulin 已从本表移除。引擎全程从不更新该字段，
-        # 它恒为初始值 0.30 —— 把常数当指标显示比不显示更误导。
+    ("kidney_endocrine", "肾脏内分泌", "RAAS 与活性维生素 D", [
+        ("renin", "肾素", "", 3), ("angiotensinogen", "血管紧张素原", "", 3),
+        ("ang1", "血管紧张素 I", "", 3), ("ang2", "血管紧张素 II", "", 3),
+        ("calcitriol", "活性维生素 D", "", 3),
+    ]),
+    ("heart", "心脏内分泌", "心房钠尿肽", [
+        ("anp", "ANP", "", 3),
+    ]),
+    ("gonads", "生殖腺", "性激素组分", [
+        ("estrogen", "雌激素（总）", "", 3), ("estradiol", "雌二醇 E2", "", 3),
+        ("estrone", "雌酮 E1", "", 3), ("estriol", "雌三醇 E3", "", 3),
+        ("progesterone", "孕激素", "", 3), ("testosterone", "睾酮", "", 3),
+        ("androstadienone", "雄甾二烯酮", "", 3),
+    ]),
+    ("pineal_skin", "松果体 · 皮肤", "褪黑素与维生素 D 前体", [
+        ("melatonin", "褪黑素", "", 3), ("vitd25", "25-羟基维生素 D", "", 3),
+    ]),
+    ("vascular", "血管内皮 · 血小板", "局部脂类介质", [
+        ("prostacyclin", "前列环素 PGI2", "", 3), ("thromboxane", "血栓素 A2", "", 3),
+        ("bradykinin", "缓激肽", "", 3), ("leukotriene", "半胱氨酰白三烯", "", 3),
+    ]),
+    ("neural", "神经胺类与递质", "中枢与自主神经", [
+        ("dopamine", "多巴胺", "", 3), ("serotonin", "5-羟色胺", "", 3),
+        ("adenosine", "腺苷", "", 3), ("acetylcholine", "乙酰胆碱", "", 3),
+        ("anandamide", "内源性大麻素", "", 3),
+    ]),
+    # ---- 受体占据（0-1），同样按器官分组 ----
+    ("receptors_central", "受体 · 中枢与垂体", "0-1", [
+        ("r_crh1", "CRH1", "", 3), ("r_trhr", "TRHR", "", 3),
+        ("r_gnrhr", "GnRHR", "", 3), ("r_melatonin", "褪黑素受体", "", 3),
+    ]),
+    ("receptors_thyroid", "受体 · 甲状腺与钙磷", "0-1", [
+        ("r_tshr", "TSHR", "", 3), ("r_tr", "甲状腺激素核受体", "", 3),
+        ("r_pthr", "PTHR", "", 3), ("r_vdr", "维生素 D 受体", "", 3),
+    ]),
+    ("receptors_adrenal", "受体 · 肾上腺与自主神经", "0-1", [
+        ("r_gcr", "糖皮质激素受体", "", 3), ("r_mr", "盐皮质激素受体", "", 3),
+        ("r_acthr", "ACTH 受体", "", 3),
+        ("r_alpha1", "血管 α1", "", 3), ("r_alpha2", "α2 自身受体", "", 3),
+        ("r_beta1", "心脏 β1", "", 3), ("r_beta2", "β2", "", 3),
         ("r_m2", "迷走 M2", "", 3),
+    ]),
+    ("receptors_pancreas", "受体 · 胰岛", "0-1", [
+        # v1.3.1：r_insulin 不再是常数。v1.3.0 里全引擎从不更新它（恒 0.30），
+        # 因此 v1.2.5 把它从本表移除；本版由登记表按 Hill 真实计算，故回归。
+        ("r_insulin", "胰岛素受体", "", 3), ("r_glucagon", "胰高血糖素受体", "", 3),
+        ("r_ss", "生长抑素受体", "", 3),
+    ]),
+    ("receptors_gut", "受体 · 胃肠", "0-1", [
+        ("r_cck1", "CCK1", "", 3), ("r_cck2", "CCK2", "", 3),
+        ("r_secretin", "促胰液素受体", "", 3), ("r_glp1", "GLP-1 受体", "", 3),
+        ("r_h1", "组胺 H1", "", 3), ("r_h2", "组胺 H2", "", 3),
+        ("r_npy", "NPY 受体", "", 3),
+    ]),
+    ("receptors_kidney", "受体 · 肾脏与容量", "0-1", [
+        ("r_at1", "血管紧张素 AT1", "", 3), ("r_avpr2", "加压素 V2", "", 3),
+        ("r_anp", "ANP 受体", "", 3),
+    ]),
+    ("receptors_gonads", "受体 · 生殖腺", "0-1", [
+        ("r_er", "雌激素受体", "", 3), ("r_pr", "孕激素受体", "", 3),
+        ("r_lhr", "LH 受体", "", 3), ("r_fshr", "FSH 受体", "", 3),
+    ]),
+    ("receptors_neural", "受体 · 神经与认知", "0-1", [
+        ("r_d1", "多巴胺 D1", "", 3), ("r_d2", "多巴胺 D2", "", 3),
+        ("r_5ht1a", "5-HT1A", "", 3), ("r_5ht2a", "5-HT2A", "", 3),
+        ("r_5ht2c", "5-HT2C", "", 3),
+        ("r_a1", "腺苷 A1", "", 3), ("r_a2", "腺苷 A2", "", 3),
+        ("r_cb1", "大麻素 CB1", "", 3), ("r_cb2", "大麻素 CB2", "", 3),
+        ("r_gaba", "GABA A", "", 3), ("r_nmda", "NMDA", "", 3),
+    ]),
+    ("receptors_vascular", "受体 · 内皮与血小板", "0-1", [
+        ("r_ip", "前列环素 IP", "", 3), ("r_tp", "血栓素 TP", "", 3),
+        ("r_b1", "缓激肽 B1", "", 3), ("r_b2", "缓激肽 B2", "", 3),
+        ("r_cylslt1", "CysLT1", "", 3), ("r_cylslt2", "CysLT2", "", 3),
     ]),
     ("thermo", "体温调节", "", [
         ("temp", "核心体温", "℃", 2), ("sweat", "出汗", "0-1", 3),
@@ -747,6 +888,12 @@ class LifeBodyPlugin(MaiBotPlugin):
                 # 当前联动的是哪个日程插件，WebUI 据此显示「麦织 / 麦生活」
                 "provider": str(status.get("provider") or ""),
                 "plugin_id": str(status.get("plugin_id") or ""),
+                # v1.3.1：麦织/麦生活的"未来安排、醒来时刻、心情参考、打扰判断"
+                "next_plan": status.get("next_plan"),
+                "sleep_until": str(status.get("sleep_until") or ""),
+                "mood_ref": status.get("mood_ref"),
+                "energy_ref": status.get("energy_ref"),
+                "behavior": status.get("behavior"),
             })
         return view
 
@@ -798,6 +945,17 @@ class LifeBodyPlugin(MaiBotPlugin):
         assert self._engine is not None
         return self._engine.s
 
+    def _sim_day_at(self, t: float) -> int:
+        """任意仿真时刻属于第几天（从 1 起）。口径见下面的 _body_sim_day。
+
+        v1.3.1 抽出来：原先只有 _body_sim_day() 用正确口径（t/3600 + clock_offset），
+        而 _on_event 另写了一份 t//86400 —— 于是事件列表里的「第 N 天」永远比状态
+        时钟早一天（实测 t=164420 的餐事件被标成第 2 天，实际是第 3 天）。
+        一个公式只留一处实现，就不会再有两套真相。
+        """
+        total_h = float(t) / H2S + float(getattr(self._engine, "clock_offset", 0.0) or 0.0)
+        return int(total_h // 24.0) + 1
+
     def _body_sim_day(self) -> int:
         """仿真进行到第几天，从 1 起。
 
@@ -807,8 +965,7 @@ class LifeBodyPlugin(MaiBotPlugin):
         """
 
         assert self._engine is not None
-        total_h = self._s.t / H2S + float(getattr(self._engine, "clock_offset", 0.0) or 0.0)
-        return int(total_h // 24.0) + 1
+        return self._sim_day_at(self._s.t)
 
     def _counters(self) -> tuple[int, int, int, int, float]:
         """计数器快照：(仿真天, 进食, 饮水, 排尿, 累计尿量)。"""
@@ -952,6 +1109,7 @@ class LifeBodyPlugin(MaiBotPlugin):
                 if self._engine is not None and self._engine.link_sleep != -1.0:
                     self._engine.link_sleep = -1.0
                     self._engine.link_activity = 0.0
+                    self._engine.link_wake_hour = -1.0
                     self._get_logger().warning(
                         "麦生活联动已失联 %.0f 秒，睡眠/活动注入值退回中性", time.time() - last_ok
                     )
@@ -964,6 +1122,25 @@ class LifeBodyPlugin(MaiBotPlugin):
             raw_sleep = data.get("sleep")
             engine.link_sleep = -1.0 if raw_sleep is None else float(raw_sleep)
             engine.link_activity = float(data.get("activity") or 0.0)
+
+            # 2026-11-22：麦织的 current 为空时仍可能"实际在睡"（刚道晚安、
+            # 临时唤醒还没续上日程）。evaluate_behavior 的结论比 current 准，
+            # 用它兜底把身体也置为睡着 —— 只补"睡着"，不反推"醒着"。
+            _beh = data.get("behavior") or {}
+            if (engine.link_sleep <= 0.0 and isinstance(_beh, dict)
+                    and str(_beh.get("reason") or "") == "sleeping"):
+                engine.link_sleep = 1.0
+
+            # 醒来时刻：麦织给 sleep_until（带时区的 ISO），换成本地小时。
+            # 没给就退回内置窗口（-1）。只在睡着时由引擎采用，见 _in_sleep_window。
+            engine.link_wake_hour = -1.0
+            _iso = str(data.get("sleep_until") or "")
+            if _iso and engine.link_sleep > 0.0:
+                try:
+                    _dt = datetime.fromisoformat(_iso)
+                    engine.link_wake_hour = _dt.hour + _dt.minute / 60.0
+                except ValueError:
+                    engine.link_wake_hour = -1.0
 
         # ---- 日程运动（2026-11-14）----
         # 麦生活的 kind 没有 exercise，只能从 summary 认。
@@ -1219,11 +1396,24 @@ class LifeBodyPlugin(MaiBotPlugin):
             "euphoria": _r(getattr(s, "euphoria", 0.0), 1),
             "dysphoria": _r(getattr(s, "dysphoria", 0.0), 1),
             "mood_valence": _r(getattr(s, "mood_valence", 0.0), 1),
+            # v1.3.1：心境底色（慢变量）也进采样，WebUI 情绪曲线要看得见它
+            "mood_tone": _r(getattr(s, "mood_tone", 0.0), 1),
+            # v1.3.1：分期是连续量，进采样而不是进事件流 ——
+            # WebUI 的「夜间分期图」就是拿这一列画的（见 _now_js 的 renderHypnogram）。
+            "sleep_stage": str(getattr(s, "sleep_stage", "awake") or "awake"),
+            "sleep_depth": _r(getattr(s, "sleep_depth", 0.0), 2),
         }
+
+    # 不落库的事件种类（v1.3.1）：这些是高频的中间状态，不是"事件"。
+    # sleep_stage：一夜几十条，且分期已改由采样承载（见 webui_history 的 stages）；
+    # 留着它只会把时间线刷满，让进食/排尿/醒来这些真正的节点被淹掉。
+    _NOISE_EVENT_KINDS = frozenset({"sleep_stage"})
 
     def _on_event(self, ev: Any) -> None:
         """把引擎事件转存为 WebUI 可读的字典。"""
 
+        if str(getattr(ev, "kind", "")) in self._NOISE_EVENT_KINDS:
+            return
         self._events.append({
             "t": _r(getattr(ev, "t", 0.0), 1),
             # 与状态时钟（_sample_point 用 s.hour）必须用同一个相位：
@@ -1233,7 +1423,8 @@ class LifeBodyPlugin(MaiBotPlugin):
                 (getattr(ev, "t", 0.0) / H2S + float(getattr(self._engine, "clock_offset", 0.0) or 0.0))
                 % 24.0
             ),
-            "day": int(getattr(ev, "t", 0.0) // 86400.0) + 1,
+            # v1.3.1 修：原为 int(t // 86400) + 1，与状态时钟口径不符（见 _sim_day_at）。
+            "day": self._sim_day_at(float(getattr(ev, "t", 0.0) or 0.0)),
             "kind": str(getattr(ev, "kind", "")),
             "level": str(getattr(ev, "severity", "info")),
             "text": str(getattr(ev, "text", "")),
@@ -1482,13 +1673,18 @@ class LifeBodyPlugin(MaiBotPlugin):
             keys = ["hr", "sbp", "dbp", "glucose", "temp", "energy", "hunger", "thirst",
                     "gastric", "bac", "na",
                     # v1.2.5：情绪序列（供 WebUI 情绪曲线）
-                    "stress", "depression", "euphoria", "dysphoria", "mood_valence"]
+                    "stress", "depression", "euphoria", "dysphoria", "mood_valence", "mood_tone",
+                    # v1.3.1：睡眠深度（0=清醒 1=深睡），与 stages 配合画夜间分期图
+                    "sleep_depth"]
             series = {k: [_r(p.get(k, 0.0), 2) for p in points] for k in keys}
             return {
                 "hours": window,
                 "count": len(points),
                 "labels": [p.get("clock", "") for p in points],
                 "days": [p.get("day", 1) for p in points],
+                # v1.3.1：分期序列（离散），与 labels 逐点对齐 ——
+                # 睡眠是连续过程，画成图比记成事件有用得多。
+                "stages": [str(p.get("sleep_stage") or "awake") for p in points],
                 "series": series,
                 "now": self._sample_point(),
             }
@@ -1611,7 +1807,13 @@ class LifeBodyPlugin(MaiBotPlugin):
                         "field": field, "label": label, "unit": unit,
                         "value": _r(getattr(s, field, 0.0), digits),
                     })
-                groups.append({"id": gid, "title": title, "subtitle": subtitle, "rows": rows})
+                groups.append({
+                    "id": gid, "title": title, "subtitle": subtitle, "rows": rows,
+                    # v1.3.1：默认展示哪些字段由后端决定（见 KEY_FIELDS），
+                    # 前端只负责「关键 + 可展开」，不在 JS 里硬编码字段名。
+                    "key": [f for f in KEY_FIELDS.get(gid, ())
+                            if any(r["field"] == f for r in rows)],
+                })
             return {
                 "clock": {"time": _clock(s.hour), "day": self._body_sim_day(), "phase": phase(s.hour)},
                 "groups": groups,
@@ -2228,6 +2430,38 @@ class LifeBodyPlugin(MaiBotPlugin):
         if s.hospital_until > s.t:
             left = (s.hospital_until - s.t) / H2S
             parts.append(f"正在住院（{s.hospital_reason or '急救中'}，约 {left:.1f} 小时后出院）")
+
+        # ---- 联动侧的"下一步 / 心情参考 / 是否适合打扰"（v1.3.1）----
+        # 只有联动开启、且对方给了数据时才出现；一律不写进身体状态。
+        _link = self._link
+        if _link is not None and getattr(self.config.link, "enabled", False):
+            _data = getattr(_link, "_cache", None) or {}
+            _nxt = _data.get("next_plan") if isinstance(_data, dict) else None
+            if isinstance(_nxt, dict) and str(_nxt.get("title") or ""):
+                _start = str(_nxt.get("start") or "")
+                _hhmm = ""
+                try:
+                    _dt = datetime.fromisoformat(_start)
+                    _hhmm = f"{_dt.hour:02d}:{_dt.minute:02d} "
+                except ValueError:
+                    _hhmm = ""
+                _place = str(_nxt.get("location") or "")
+                _when = (_hhmm + "的") if _hhmm else ""
+                parts.append(f"日程上{_when}下一步是「{_nxt.get('title')}」"
+                             + (f"，在{_place}" if _place else ""))
+            _beh = _data.get("behavior") if isinstance(_data, dict) else None
+            if isinstance(_beh, dict) and str(_beh.get("decision") or "") == "defer":
+                _why = {"sleeping": "在睡", "busy": "在忙", "farewell": "在道晚安"}.get(
+                    str(_beh.get("reason") or ""), "不太方便")
+                parts.append(f"日程那边说她{_why}，这会儿别打扰")
+            _mood_ref = _data.get("mood_ref") if isinstance(_data, dict) else None
+            try:
+                if _mood_ref is not None and abs(float(_mood_ref)) >= 10.0:
+                    _m = float(_mood_ref)
+                    parts.append(("日程那边记的心情偏" + ("好" if _m > 0 else "差"))
+                                 + f"（{_m:+.0f}/100，仅供参考）")
+            except (TypeError, ValueError):
+                pass
 
         if not parts:
             return ""

@@ -168,14 +168,161 @@ class BodyState:
     r_alpha1: float = 0.10    # 血管 α1              [APK: Adrenoceptor]
     r_beta1: float = 0.15     # 心脏 β1              [APK: Adrenoceptor]
     r_m2: float = 0.20        # 迷走 M2              [APK: M Receptor]
-    r_insulin: float = 0.30   # 胰岛素受体           [APK: Insulin Receptor]
+    # 2026-11-21（v1.3.1）：r_insulin 自 v1.3.0 起恒为 0.30（引擎从不更新它），
+    # 本版由 endocrine 的登记表按 Hill 统一计算，故默认值仍取静息占据 0.28 附近。
+    r_insulin: float = 0.28   # 胰岛素受体           [APK: Insulin Receptor]
     # 糖皮质激素受体（GCR）。2026-11-18 新增。
     # 依据：LIFE.apk 元数据含 Glucocorticoid_receptor / GCR，而本插件此前
     # 只有 cortisol 配体、没有任何受体靶点，"激素影响情绪"缺最后一环。
     # 取值由 Hill 方程 n=2 算出，见 engine._endocrine。
     r_gcr: float = 0.28       # 0..1                 [APK: Glucocorticoid_receptor]
 
+    # =====================================================================
+    # 内分泌（v1.3.1）：按器官分科补齐的激素与受体
+    # =====================================================================
+    # 来源：LIFE.apk il2cpp 元数据（apk_report/il2cpp_strings.txt）。
+    # HormoneType 枚举在 10132 行（肽类 / 类固醇 / Others 三组），
+    # 其余单胺与脂类介质在 5847、947 行；受体枚举在 947/949 行。
+    # 依据与逐条归属见 body/endocrine/organs/*.py 的模块头。
+    #
+    # 单位约定：除 ca（mmol/L）外全部是无量纲相对浓度，1.0 ≈ 常见生理水平。
+    # 这些字段**不驱动任何既有体征**，只计算并导出（见 endocrine/__init__.py 纪律）。
+    # 默认值必须与 organs 里声明的 rest 逐条相等 —— registry_audit() 会核对。
+
+    # ---- 下丘脑 · 垂体（central）----
+    crh: float = 0.30             # 促肾上腺皮质激素释放激素  [APK: CRH]
+    trh: float = 0.50             # 促甲状腺激素释放激素      [APK: TRH]
+    gnrh: float = 0.30            # 促性腺激素释放激素        [APK: GnRH]
+    fsh: float = 0.40             # 卵泡刺激素                [APK: FSH]
+    lh: float = 0.30              # 黄体生成素                [APK: LH]
+    prolactin: float = 0.30       # 催乳素                    [APK: Prolactin]
+    oxytocin: float = 0.10        # 催产素                    [APK: Oxytocin]
+
+    # ---- 甲状腺（thyroid）----
+    t4: float = 1.00              # 甲状腺素                  [APK: T4 / Thyroid Hormone]
+    calcitonin: float = 0.20      # 降钙素                    [APK: Calcitonin]
+
+    # ---- 甲状旁腺 · 钙磷（parathyroid）----
+    pth: float = 0.60             # 甲状旁腺激素              [APK: PTH]
+    ca: float = 2.35              # 血钙 mmol/L               [APK: Calcium]
+    # ca 是本组新增的唯一非激素量。PTH 的全部意义就是把血钙拉回设定点，
+    # 只算 PTH 而不给钙，这条轴就是空转的。它不驱动任何既有体征。
+
+    # ---- 肾上腺（adrenal）----
+    norepinephrine: float = 0.25  # 去甲肾上腺素              [APK: Norepinephrine]
+    dhea: float = 0.30            # DHEA                      [APK: Androstenolone]
+    androstenedione: float = 0.15 # 雄烯二酮                  [APK: Androstenolone 族]
+
+    # ---- 胰岛（pancreas）----
+    glucagon: float = 0.50        # 胰高血糖素                [APK: Glucagon]
+    amylin: float = 0.30          # 淀粉素                    [APK: Amylin]
+    somatostatin: float = 0.20    # 生长抑素（δ 细胞）        [APK: Somatostatin]
+
+    # ---- 胃肠腺体（gut；其余 7 条在 engine._digest 推进）----
+    neurotensin: float = 0.10     # 神经降压素                [APK: Neurotensin]
+    histamine: float = 0.20       # 组胺（ECL 细胞）          [APK: Histamine]
+
+    # ---- 肾脏（kidney）----
+    ang1: float = 0.80            # 血管紧张素 I              [APK: Angiotensin I]
+    calcitriol: float = 0.60      # 活性维生素 D              [APK: Calcitriol]
+
+    # ---- 心脏（heart）----
+    anp: float = 0.25             # 心房钠尿肽                [APK: ANP]
+
+    # ---- 肝脏（liver）----
+    angiotensinogen: float = 1.00 # 血管紧张素原              [APK: Angiotensinogen]
+
+    # ---- 生殖腺（gonads；estrogen/progesterone 由 engine._menstrual 推进）----
+    estradiol: float = 0.00       # 雌二醇 E2                 [APK: Estradiol]
+    estrone: float = 0.00         # 雌酮 E1                   [APK: Estrone]
+    estriol: float = 0.00         # 雌三醇 E3                 [APK: Estriol]
+    testosterone: float = 0.06    # 睾酮                      [APK: Testosterone]
+    androstadienone: float = 0.05 # 雄甾二烯酮                [APK: Androstadienone]
+
+    # ---- 松果体（pineal）----
+    melatonin: float = 0.20       # 褪黑素                    [APK: Melatonin]
+
+    # ---- 皮肤（skin）----
+    vitd25: float = 0.45          # 25-羟基维生素 D（推导量，见 organs/skin.py）
+
+    # ---- 血管内皮 · 血小板（vascular）----
+    prostacyclin: float = 0.20    # 前列环素 PGI2             [APK: Prostacyclin]
+    thromboxane: float = 0.10     # 血栓素 A2                 [APK: ThromboxaneA2]
+    bradykinin: float = 0.05      # 缓激肽                    [APK: Bradykinin]
+    leukotriene: float = 0.05     # 半胱氨酰白三烯            [APK: LeukotrieneC4]
+
+    # ---- 神经胺类与递质（neural）----
+    dopamine: float = 0.30        # 多巴胺                    [APK: Dopamine]
+    serotonin: float = 0.40       # 5-羟色胺                  [APK: Serotonin]
+    adenosine: float = 0.40       # 腺苷（睡眠压力）          [APK: Adenosine]
+    acetylcholine: float = 0.30   # 乙酰胆碱（副交感递质）    [APK: Acetylcholine]
+    anandamide: float = 0.10      # 内源性大麻素              [APK: Anandamide]
+
+    # ---- 受体占据（v1.3.1 新增，0..1）----
+    # 默认 0：它们在每个内分泌步由登记表统一重算，首个仿真步即得真实值。
+    # Kd 口径见 body/endocrine/base.py（Kd = 1.6 × 配体静息值，与 r_gcr 同一标尺）。
+    # ---- 下丘脑-垂体靶受体 ----
+    r_crh1: float = 0.0           # CRH1                      [APK: CRH1]
+    r_trhr: float = 0.0           # TRHR                      [APK: TRHR]
+    r_gnrhr: float = 0.0          # GnRHR                     [APK: GnRHR]
+    # ---- 甲状腺 ----
+    r_tshr: float = 0.0           # TSHR                      [APK: TSHR]
+    r_tr: float = 0.0             # 甲状腺激素核受体          [APK: TR]
+    # ---- 钙磷 ----
+    r_pthr: float = 0.0           # PTHR                      [APK: PTHR]
+    r_vdr: float = 0.0            # 维生素 D 受体             [APK: VDR]
+    # ---- 肾上腺 ----
+    r_mr: float = 0.0             # 盐皮质激素受体            [APK: MineralocorticoidReceptor]
+    r_acthr: float = 0.0          # ACTH 受体                 [APK: ACTHReceptor]
+    r_beta2: float = 0.0          # β2 肾上腺素能             [APK: Adrenoceptor(beta2)]
+    r_alpha2: float = 0.0         # α2 肾上腺素能             [APK: Adrenoceptor(alpha2)]
+    # ---- 胰岛 ----
+    r_glucagon: float = 0.0       # 胰高血糖素受体            [APK: Glucagon Receptor]
+    r_ss: float = 0.0             # 生长抑素受体              [APK: SS]
+    # ---- 胃肠 ----
+    r_cck1: float = 0.0           # CCK1                      [APK: CCK1]
+    r_cck2: float = 0.0           # CCK2                      [APK: CCK2]
+    r_secretin: float = 0.0       # 促胰液素受体              [APK: Secretin Receptor]
+    r_glp1: float = 0.0           # GLP-1 受体（文献补）       [APK: 无独立串]
+    r_h2: float = 0.0             # 组胺 H2                   [APK: H2]
+    r_h1: float = 0.0             # 组胺 H1                   [APK: H1]
+    r_npy: float = 0.0            # NPY 受体（未驱动）        [APK: NPY]
+    # ---- 肾脏 ----
+    r_at1: float = 0.0            # 血管紧张素 II 1 型受体    [APK: AGT Receptor]
+    r_avpr2: float = 0.0          # 血管加压素 V2             [APK: Vasopressin 2 R]
+    r_anp: float = 0.0            # 心房钠尿肽受体            [APK: ANPReceptor]
+    # ---- 生殖腺 ----
+    r_er: float = 0.0             # 雌激素受体                [APK: ER]
+    r_pr: float = 0.0             # 孕激素受体                [APK: PR]
+    r_lhr: float = 0.0            # LH 受体                   [APK: LHR]
+    r_fshr: float = 0.0           # FSH 受体                  [APK: FSHR]
+    # ---- 松果体 ----
+    r_melatonin: float = 0.0      # 褪黑素受体                [APK: Melatonin Receptor]
+    # ---- 神经胺类 ----
+    r_d1: float = 0.0             # 多巴胺 D1                 [APK: D1]
+    r_d2: float = 0.0             # 多巴胺 D2                 [APK: D2]
+    r_5ht1a: float = 0.0          # 5-HT1A                    [APK: 5-HT1A]
+    r_5ht2a: float = 0.0          # 5-HT2A                    [APK: 5-HT2A]
+    r_5ht2c: float = 0.0          # 5-HT2C                    [APK: 5-HT2C]
+    r_a1: float = 0.0             # 腺苷 A1（咖啡因拮抗）      [APK: A1]
+    r_a2: float = 0.0             # 腺苷 A2（咖啡因拮抗）      [APK: A2]
+    r_cb1: float = 0.0            # 大麻素 CB1                [APK: CB1]
+    r_cb2: float = 0.0            # 大麻素 CB2                [APK: CB2]
+    r_gaba: float = 0.0           # GABA A（未驱动）          [APK: GABA A]
+    r_nmda: float = 0.0           # NMDA（未驱动）            [APK: NMDA Receptor]
+    # ---- 血管内皮 · 血小板 ----
+    r_ip: float = 0.0             # 前列环素受体 IP           [APK: IP]
+    r_tp: float = 0.0             # 血栓素受体 TP             [APK: TP]
+    r_b1: float = 0.0             # 缓激肽 B1                 [APK: B1]
+    r_b2: float = 0.0             # 缓激肽 B2                 [APK: B2]
+    r_cylslt1: float = 0.0        # 半胱氨酰白三烯受体 1      [APK: CYSLTR1]
+    r_cylslt2: float = 0.0        # 半胱氨酰白三烯受体 2      [APK: CYSLTR2]
+
     # ---- 体温 ----
+    # 睡眠驱动的体温慢项（0..1，2026-11-22 v1.3.1 新增）。
+    # 与 sleep_depth 分家的原因见 engine._thermo：sleep_depth 是逐阶段跳变的方波，
+    # 拿它乘「整夜降幅」会把慢变量变成锯齿；这个字段只表达「睡着了没有」。
+    sleep_drive: float = 0.0  # 睡眠慢驱动 0..1
     temp: float = 36.8        #                      [APK: Thermometer]
     sweat: float = 0.0        #                      [APK: Sweat Gland]
     shiver: float = 0.0
@@ -199,6 +346,10 @@ class BodyState:
     # 正/负之后写进这里，引擎让它自行衰减回 0（情绪本来就该过去）。
     # 它只影响 stress 的目标值，不直接钉死 stress，避免覆盖内生调节。
     mood_valence: float = 0.0   # -100..100（正=愉悦，负=不快）
+    # 心境底色（v1.3.1，2026-11-22 新增）：由身体状态（精力/睡眠/疼痛/经前/口渴饥饿）
+    # 缓慢驱动，τ=4 小时。它解释"两次对话之间情绪不是 0"这件事，
+    # 与瞬时情绪效价分开演进：后者 20 分钟就散，前者是底色。
+    mood_tone: float = 0.0      # -60..+40
     euphoria: float = 0.0       # 欣快 0..100          [APK: Euphoria]
     dysphoria: float = 0.0      # 心境恶劣 0..100      [APK: Dysphoria]
 

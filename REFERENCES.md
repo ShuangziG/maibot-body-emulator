@@ -623,3 +623,100 @@ doi:10.1038/s41380-018-0017-5. PMID 29453413.
 | 情绪→压力耦合 | 0.55 | 工程标定，使满值 ±100 对应 ∓55 分压力 |
 | 瞬时情绪衰减 | 360 s / 180 s | 体感目标（一句话的影响数分钟内过去），无一手测定 |
 | 欣快/烦躁的合成权重 | 见 engine._affect | **工程映射，非文献系数** |
+
+---
+
+## [R36] Harding EC, Franks NP, Wisden W.
+**Sleep and thermoregulation.**
+*Current Opinion in Physiology*. PMC7323637
+
+**查阅方式**：直接抓取 PMC 正文段落（一手）。
+
+**用于**：`body/engine.py` `_thermo` 的睡眠期体温建模（v1.3.1 方案 A）。
+
+**取用内容**：进入 NREM 即降温；"core temperature drops on every transition to NREM sleep"
+（去同步实验中仍成立）；REM 期体温调节暂停（poikilothermia），脑温反升 0.1~0.2℃；
+卧床受试者 24 小时体温周期约 1℃；入睡前 2 小时核心温开始下降。
+
+**未取用**：REM 期调节暂停这一条**没有**单独建模 —— 再引入一个分期耦合会退回锯齿伪像。
+
+## [R37] Human Body Temperature Circadian Rhythm in Health and Disease.
+*IntechOpen*. DOI: 10.5772/intechopen.1003852
+
+**查阅方式**：抓取章节正文（一手）。
+
+**用于**：正常核心体温范围与昼夜节律的存在性。
+
+**取用内容**：Wunderlich 1868 百万级腋温读数 → 均值 37℃、正常上限 38℃；
+核心部位测值高于口腔/腋下/鼓膜。
+
+## [R38] Dhami P, et al.
+**Approach to Low Body Temperature or Mild Hypothermia in the Geriatric Population: A Narrative Review.**
+PMC13094164
+
+**查阅方式**：抓取摘要与正文段落（一手）。
+
+**用于**：`s.shiver` 的阈值。
+
+**取用内容**：正常核心 36.1~37.2℃；失温 <35.0℃；35.0~36.0 称 "low body temperature"；
+寒战是 <35℃ 的伴随症状。→ 阈值 36.5 → 35.8 → **35.5**。
+
+## [R39] 低热与发热的临床划分（**二手**）
+低热 37.5~38.3℃；CDC 定义发热 ≥38.0℃。
+
+**查阅方式**：检索摘要与厂商科普页，**未取得原始指南全文**。
+
+**用于**：`FEVER_C`（体温影响心率/CO₂/失水的起点），37.3 → **37.5**。
+
+## [R40] 夜间血压下降幅度（**二手**）
+正常 dipper 夜间血压下降 10~20%；非 dipper（<10%）心血管风险升高。
+
+**查阅方式**：检索摘要（Hypertension Research 综述一系），**未读原文**。
+
+**用于**：核对夜间血压建模 —— 实测下降 13%，在区间内，**未改动代码**。
+
+## [R41] NREM / REM 心率区间（**二手**）
+NREM 心率 50~75（深睡可到 40 余），REM 可回升接近清醒水平。
+
+**查阅方式**：检索摘要（临床科普综述），**未读原始研究**。
+
+**用于**：核对深睡心率 60、REM 62.8 —— 在区间内，**未改动代码**。
+
+## [R42] Positivity offset（**二手**）
+人对中性刺激倾向给出轻微正性评价，对生活总体给出"大部分时候是好的"。
+
+**查阅方式**：检索摘要与维基条目，原始文献（Cacioppo 等）**未读**。
+
+**用于**：支持欣快给健康身体一个 15~25 的轻微正性基线。
+
+## [R43] Letting Go of the Negative, Holding on to the Positive（**二手**）
+差异情绪习惯化研究：正性情绪消退更快、负性情绪更持久。
+
+**查阅方式**：加州大学伯克利分校 Letters & Science 新闻稿（2024），**未见论文原文**。
+
+**用于**：烦躁与欣快拆成不同时间常数（`DYSPH_TAU = 900` vs `EUPH_TAU = 180`）。
+
+## [R44] 咖啡因剂量与时机对睡眠的影响（随机交叉试验）
+Dose and timing effects of caffeine on subsequent sleep: a randomized clinical crossover trial. PMC11985402
+
+**查阅方式**：抓取 PMC 正文摘要段（一手）。23 名男性、7 个条件、安慰剂对照、双盲交叉。
+
+**取用内容**：100 mg 即使睡前 4 h 也无显著影响；400 mg 在睡前 12 h 内显著推迟入睡，
+8 h 内睡眠碎片化显著增加，4 h 前主观睡眠质量 −34.02%。
+
+**用于**：`_night_window` 的咖啡因推迟入睡（阈值 150 mg、400 mg → +20 分钟）。
+
+## [R45] 酒精对睡眠结构的影响（PSG）
+The Acute Effects of Alcohol on Sleep Architecture in Late Adolescence. *Alcohol Clin Exp Res*. 2013;37(10):1720-1728. PMC3987855
+
+**查阅方式**：抓取 PMC 页面（摘要与元数据为一手；**具体 REM 抑制百分比未取到**）。
+
+**取用内容**：前半夜 REM 被抑制、后半夜反跳，伴睡眠碎片化。
+**模型中 25%/10% 是量级估计**，不是原文数值。
+
+## [R46] 急性运动与慢波睡眠
+- Kredlow MA, et al. The effects of physical activity on sleep: a meta-analytic review.（**二手**，未见全文）
+- 另有研究报道急性运动后 SWS +33%；而"睡前 4~8 h 最佳、过近反而缩短 SWS"来自
+  *Different Intensities of Evening Exercise on Sleep* 的检索摘要（**二手**）。
+
+**用于**：`_advance_stage` 的运动加深慢波（+20% / +10%）与入睡提前（−8 / −4 分钟）。

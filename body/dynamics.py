@@ -2,7 +2,7 @@
 
 为什么单独成文件（2026-11-18 结构规整）：
   engine.py 的各子系统（内分泌、情绪、体温…）都要用 approach()。
-  若把它留在 engine 里，endocrine.py 导入 engine 就会形成循环导入，
+  若把它留在 engine 里，body/endocrine/ 导入 engine 就会形成循环导入，
   只能退化成「在 endocrine 里复制一份公式」—— 两份公式迟早会走偏。
   因此把「与生理语义无关的纯数值工具」独立出来：
     state（数据） -> dynamics（数值） -> endocrine/engine（语义）

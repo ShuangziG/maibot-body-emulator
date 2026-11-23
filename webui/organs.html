@@ -181,6 +181,11 @@
   .lb-kv span:last-child{font-family:var(--lb-font-mono);font-weight:500}
   .lb-pool-title{font-size:12px;font-weight:600;margin-bottom:6px}
   .lb-pool-item{font-size:12px;color:var(--lb-muted);padding:3px 0}
+  /* v1.3.1：分组卡片默认只给关键字段，这里是与折叠配套的展开按钮 */
+  .lb-more{display:block;width:100%;margin-top:6px;padding:6px 10px;border-radius:8px;
+    border:1px dashed var(--lb-border);background:transparent;color:var(--lb-muted);
+    font-size:11px;font-family:inherit;cursor:pointer;transition:.15s;text-align:center}
+  .lb-more:hover{color:var(--lb-fg);border-color:var(--lb-primary)}
   .lb-wave-wrap{margin-top:6px}
   .lb-wave-label{font-size:12px;color:var(--lb-muted);margin-bottom:4px}
   .lb-wave-label span{color:var(--lb-fg);margin-left:6px}
@@ -194,7 +199,10 @@
 (function () {
   'use strict';
 
-  var STATE = { organs: null, foods: null, active: '', foodGroup: '' };
+  // expanded：哪些分组被展开过（点「展开其余 N 项」）。
+  // 记在 STATE 里而不是 DOM 里：15 秒一轮自动刷新会重建 innerHTML，
+  // 状态若只存在 DOM 上，用户刚展开的卡片下一轮就自己收回去。
+  var STATE = { organs: null, foods: null, active: '', foodGroup: '', expanded: {} };
 
   function $(id) { return document.getElementById(id); }
   function txt(id, v) { var el = $(id); if (el) el.textContent = v; }
@@ -231,6 +239,17 @@
     });
   }
 
+  // 一行字段（label + 单位 + 值）
+  function kvRow(r) {
+    return '<div class="lb-kv"><span>' + esc(r.label) +
+      (r.unit ? ' <em style="font-style:normal;opacity:.6">' + esc(r.unit) + '</em>' : '') +
+      '</span><span>' + fmt(r.value) + '</span></div>';
+  }
+
+  // 2026-11-21（v1.3.1）：内脏页 160 个字段全量平铺等于刷屏。
+  // 默认只给后端指定的「关键字段」（g.key），其余折叠；字段少的分组不折叠。
+  // 关键字段的取舍在 plugin.py 的 KEY_FIELDS 里，前端不硬编码任何字段名 ——
+  // 加一个字段或换一个关键量只改一处。
   function renderGroups() {
     var d = STATE.organs || {};
     var groups = d.groups || [];
@@ -239,14 +258,40 @@
     var shown = groups.filter(function (g) { return !STATE.active || g.id === STATE.active; });
     if (!shown.length) { box.innerHTML = '<div class="lb-empty">没有可展示的分组</div>'; return; }
     box.innerHTML = shown.map(function (g) {
-      var rows = (g.rows || []).map(function (r) {
-        return '<div class="lb-kv"><span>' + esc(r.label) +
-          (r.unit ? ' <em style="font-style:normal;opacity:.6">' + esc(r.unit) + '</em>' : '') +
-          '</span><span>' + fmt(r.value) + '</span></div>';
-      }).join('');
-      return '<section class="lb-card"><div class="lb-card-hd"><h2>' + esc(g.title) +
-        '</h2><span class="lb-card-sub">' + esc(g.subtitle || '') + '</span></div>' + rows + '</section>';
+      var rows = g.rows || [];
+      var keys = g.key || [];
+      var isOpen = !!STATE.expanded[g.id];
+      var keyRows, restRows;
+      if (keys.length && keys.length < rows.length) {
+        var set = {};
+        keys.forEach(function (f) { set[f] = 1; });
+        keyRows = rows.filter(function (r) { return set[r.field]; });
+        restRows = rows.filter(function (r) { return !set[r.field]; });
+      } else {
+        keyRows = rows;
+        restRows = [];
+      }
+      var body = keyRows.map(kvRow).join('') + (isOpen ? restRows.map(kvRow).join('') : '');
+      var more = '';
+      if (restRows.length) {
+        more = '<button type="button" class="lb-more" data-more="' + esc(g.id) + '">' +
+          (isOpen ? '收起（保留 ' + keyRows.length + ' 项关键）'
+                  : '展开其余 ' + restRows.length + ' 项 · 共 ' + rows.length + ' 项') +
+          '</button>';
+      }
+      return '<section class="lb-card" data-group="' + esc(g.id) + '">' +
+        '<div class="lb-card-hd"><h2>' + esc(g.title) +
+        '</h2><span class="lb-card-sub">' + esc(g.subtitle || '') + '</span></div>' +
+        body + more + '</section>';
     }).join('');
+
+    box.querySelectorAll('[data-more]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var gid = btn.getAttribute('data-more');
+        STATE.expanded[gid] = !STATE.expanded[gid];
+        renderGroups();
+      });
+    });
   }
 
   function fmt(v) {
