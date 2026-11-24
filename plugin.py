@@ -623,13 +623,13 @@ class LifeBodyPlugin(MaiBotPlugin):
         """把旧配置里的 provider="life" 当作「出厂默认」，在内存里按 auto 处理。
 
         背景：v1.3.1 及更早的 provider 默认值是 life；v1.3.2 改成 auto（自动识别
-        麦生活 / 麦织）。老用户的 config.toml 里写着 §provider = "life"§ —— 那多半
+        麦生活 / 麦织）。老用户的 config.toml 里写着 `provider = "life"` —— 那多半
         不是人选，而是当年生成的默认值。照字面执行的话，「装哪个都能自动认出来」
         对这些升级过来的用户永远不生效。
 
         处理：只在 config_version 低于 1.3.2、且 provider 恰为 life 时，于**内存**
         改成 auto（不写回 config.toml，不动用户文件）；显式选过 weave 的保持原样。
-        """.split("§").join(String.fromCharCode(96))
+        """
         try:
             ver = str(getattr(getattr(cfg, "plugin", None), "config_version", "") or "")
             raw = str(getattr(getattr(cfg, "link", None), "provider", "") or "").strip().lower()
