@@ -51,6 +51,9 @@ issue 要修的「糖分丢失」就绕回来了。规则：别名唯一映射�
 from __future__ import annotations
 
 from .food import Food
+# v1.4.0：288 项扩展食物没有逐项微量营养素真值，按类别画像赋值。
+# nutrient_profile 不反向依赖 food，故此处模块级导入无循环风险。
+from . import nutrient_profile as _np
 
 # (key, label, group, portion, volume_ml, water_ml, na_mmol,
 #  carb_g, protein_g, fat_g, alcohol_g, caffeine_mg, gi, aliases)
@@ -376,6 +379,19 @@ _ROWS = [
 _ROWS += [
     ("KungPaoChicken", "宫保鸡丁", "菜品", "一份 150 g", 150, 95, 8.0, 10, 18, 14, 0, 0, 30,
      ("宫保鸡丁", "宫爆鸡丁")),
+    # 2026-11-27（v1.4.0）：补三道具体汤品。原先只有通用的 "Soup（汤）"，
+    # 候选池只能写出「米饭 + 鸡胸肉 + 汤」，看不出这一顿到底吃了什么。
+    # 份量与热量按《中国食物成分表（第 6 版）》一碗的常见值估算，仍是 B 级。
+    ("SeaweedSoup", "紫菜汤", "菜品", "一碗 250 mL", 250, 240, 10, 4, 2, 0.5, 0, 0, 25,
+     ("紫菜汤", "紫菜蛋花汤")),
+    # 2026-11-27（v1.4.0）：实测 4B 在「麻辣香锅」上给了空数组——库里只有麻辣烫/
+    # 麻辣拌，没有这一道。整餐凭空丢掉比粗一点更糟，先补这一条。
+    ("MalaXiangGuo", "麻辣香锅", "菜品", "一份 500 g", 500, 380, 30, 25, 30, 35, 0, 0, 40,
+     ("麻辣香锅", "香锅")),
+    ("TomatoEggSoup", "番茄蛋汤", "菜品", "一碗 250 mL", 250, 235, 9, 5, 4, 3, 0, 0, 25,
+     ("番茄蛋汤", "西红柿蛋汤", "西红柿鸡蛋汤")),
+    ("KelpTofuSoup", "海带豆腐汤", "菜品", "一碗 250 mL", 250, 235, 12, 4, 4, 2, 0, 0, 20,
+     ("海带汤", "海带豆腐汤")),
     ("YuXiangPork", "鱼香肉丝", "菜品", "一份 150 g", 150, 95, 6.0, 12, 13, 14, 0, 0, 30,
      ("鱼香肉丝",)),
     ("MapoTofu", "麻婆豆腐", "菜品", "一份 180 g", 180, 135, 12, 8, 12, 10, 0, 0, 30,
@@ -384,8 +400,10 @@ _ROWS += [
      ("糖醋里脊", "糖醋排骨")),
     ("ColaChickenWing", "可乐鸡翅", "菜品", "一份 150 g", 150, 90, 6.0, 18, 16, 12, 0, 0, 45,
      ("可乐鸡翅",)),
+    # 2026-11-27（v1.4.0）：别名里去掉「黄焖鸡米饭」——那份菜不含饭，整串映射会丢掉
+    # 一碗饭。该词条由 food.py 的 FOOD_ALIASES 映射成 ["BraisedChickenRice","Rice"]。
     ("BraisedChickenRice", "黄焖鸡", "菜品", "一份 250 g", 250, 165, 15, 10, 22, 18, 0, 0, 45,
-     ("黄焖鸡", "黄焖鸡米饭")),
+     ("黄焖鸡",)),
     ("BigPlateChicken", "大盘鸡", "菜品", "一份 400 g", 400, 250, 40, 30, 30, 30, 0, 0, 40,
      ("大盘鸡",)),
     ("SpicyChicken", "辣子鸡", "菜品", "一份 200 g", 200, 110, 20, 8, 20, 20, 0, 0, 20,
@@ -533,6 +551,36 @@ _ALIAS_EXTRA = [
     ("部队锅", ["ArmyStew"]), ("炸猪排", ["PorkCutlet"]),
 ]
 
+# ================= 2026-11-27（v1.4.0）基础食材补齐 =================
+# 拆解用的白名单（_DECOMPOSE_KEYS）只能从库内选，缺一项就等于那样东西整块
+# 营养素没记账。下面这些是「一道菜拆开后最常出现、库里却没有」的成分。
+# 数值仍是 B 级估算：份量与热量取《中国食物成分表（第 6 版）》的常见值。
+_ROWS += [
+    # 油与糖：一切炒/煎/炸/红烧的底子，不补的话一顿菜少算 100~200 kcal。
+    ("CookingOil", "食用油", "调味", "一份 10 g", 10, 0, 0, 0, 0, 10, 0, 0, 0,
+     ("食用油", "植物油", "花生油", "菜籽油", "色拉油")),
+    ("Sugar", "白砂糖", "调味", "一份 10 g", 10, 0, 0, 10, 0, 0, 0, 0, 65,
+     ("白砂糖", "砂糖", "白糖", "绵白糖")),
+    ("Butter", "黄油", "调味", "一份 10 g", 10, 1, 0.5, 0, 0, 8, 0, 0, 0,
+     ("黄油", "牛油")),
+    # 肉类泛称：库里只有牛排/牛腩/肥牛/羊肉串，没有「牛肉」「羊肉」这两个词。
+    ("Beef", "牛肉", "肉蛋", "一份 100 g", 100, 60, 4.0, 0, 20, 4, 0, 0, 0,
+     ("牛肉", "瘦牛肉")),
+    ("Lamb", "羊肉", "肉蛋", "一份 100 g", 100, 60, 4.0, 0, 19, 14, 0, 0, 0,
+     ("羊肉",)),
+    ("PorkLiver", "猪肝", "肉蛋", "一份 100 g", 100, 70, 3.0, 3, 19, 4, 0, 0, 0,
+     ("猪肝",)),
+    ("Cheese", "奶酪", "肉蛋", "一片 20 g", 20, 5, 3.0, 0.5, 4, 5, 0, 0, 0,
+     ("奶酪", "芝士", "起司")),
+    # 主食与蔬菜的泛称：菜单上最常写的偏偏是「面条」「青菜」，库里只有具体品种。
+    ("Noodles", "面条", "主食", "一碗 200 g 熟", 400, 300, 3.0, 55, 9, 2, 0, 0, 55,
+     ("面条", "挂面", "阳春面", "清汤面")),
+    ("Greens", "青菜", "蔬菜", "一份 150 g", 150, 130, 2.0, 4, 2.5, 0.3, 0, 0, 20,
+     ("青菜", "时蔬", "绿叶菜")),
+    ("WhiteFish", "鱼肉", "水产", "一份 100 g", 100, 75, 3.0, 0, 19, 2, 0, 0, 0,
+     ("鱼肉", "白身鱼")),
+]
+
 # 给菜名拆解用的核心 key（utils 模型每次都要带，控制在百条以内）
 _DECOMPOSE_EXTRA = [
     ("Rice", "米饭"), ("Congee", "白粥"), ("NoodleSoup", "汤面"), ("Ramen", "拉面"),
@@ -558,6 +606,27 @@ _DECOMPOSE_EXTRA = [
     ("Yogurt", "酸奶"), ("Coke", "可乐"), ("Beer", "啤酒"), ("Baijiu52", "白酒"),
     ("Wine", "葡萄酒"), ("Chocolate", "巧克力"), ("Nut", "坚果"),
     ("PotatoChips", "薯片"), ("IceCream", "冰淇淋"), ("Mooncake", "月饼"),
+    # 2026-11-27（v1.4.0）：下面这批库内早就有，只是没登记进拆解白名单 ——
+    # 模型看得见菜、选不到食材，等于白拆一次。
+    ("RiceFlourNoodles", "米粉"), ("DriedTofu", "豆腐干"), ("Vermicelli", "粉丝"),
+    ("RiceCake", "年糕"), ("DuckMeat", "鸭肉"), ("Peanut", "花生"),
+    ("Edamame", "毛豆"), ("Chive", "韭菜"), ("BeanSprouts", "豆芽"),
+    ("Pumpkin", "南瓜"), ("WinterMelon", "冬瓜"), ("WoodEar", "木耳"),
+    ("Shiitake", "香菇"), ("Nori", "紫菜"), ("Ham", "火腿"),
+    # 同批新增的十项基础食材
+    ("CookingOil", "食用油"), ("Sugar", "白砂糖"), ("Butter", "黄油"),
+    ("Beef", "牛肉"), ("Lamb", "羊肉"), ("PorkLiver", "猪肝"),
+    ("Cheese", "奶酪"), ("Noodles", "面条"), ("Greens", "青菜"),
+    ("WhiteFish", "鱼肉"),
+    # 2026-11-27（v1.4.0）：家常菜名与常见鱼种。实测 4B 模型在缺项时会拿最近的食材
+    # 硬凑 —— 「宫保鸡丁」不在表里就输出「炸鸡」，「鲈鱼」不在就输出「三文鱼」。
+    ("KungPaoChicken", "宫保鸡丁"), ("MapoTofu", "麻婆豆腐"),
+    ("YuXiangPork", "鱼香肉丝"), ("SweetSourPork", "糖醋里脊"),
+    ("FishWithPickles", "酸菜鱼"), ("BoiledFish", "水煮鱼"),
+    ("GrilledFish", "烤鱼"), ("SpicyChicken", "辣子鸡"),
+    ("TwiceCookedPork", "回锅肉"), ("ColaChickenWing", "可乐鸡翅"),
+    ("SeaBass", "鲈鱼"), ("GrassCarp", "草鱼"),
+    ("Hairtail", "带鱼"), ("Cod", "鳕鱼"), ("MalaXiangGuo", "麻辣香锅"),
 ]
 
 # ================= 三餐 / 饮品 / 加餐池扩充 =================
@@ -570,21 +639,21 @@ _MEAL_EXTRA = {
         ["SoyMilk", "Jianbing"],
         ["Latte", "Croissant", "Egg"],
     ],
+    # 2026-11-27（v1.4.0）：原先这里追加的组合还带着通用的 "Soup"，
+    # 面板上会和新写的基础池并存成「米饭+宫保鸡丁+汤」。改成具体菜名的搭配，
+    # 并避开与新基础池重复的条目。
     "lunch": [
-        ["Rice", "KungPaoChicken", "Soup"],
         ["Rice", "MapoTofu", "TomatoEgg", "Kelp"],
-        ["Rice", "RedBraisedPork", "Soup"],
-        ["BeefNoodles", "CucumberSalad"],
-        ["Rice", "TomatoEgg", "Soup"],
-        ["PorkDumpling", "Soup"],
+        ["PorkDumpling", "SeaweedSoup"],
+        ["Rice", "ColaChickenWing", "CucumberSalad", "TomatoEggSoup"],
+        ["TonkotsuRamen", "CucumberSalad"],
+        ["Rice", "YuXiangPork", "SeaweedSoup", "StirFriedGreens"],
     ],
     "dinner": [
-        ["Rice", "SweetSourPork", "Soup"],
-        ["Rice", "BraisedBeef", "Soup"],
         ["Congee", "VegBao", "Egg", "CucumberSalad"],
-        ["Rice", "Shrimp", "Soup"],
-        ["Pasta", "TomatoEgg", "VegSalad"],
-        ["Rice", "FishWithPickles", "StirFriedGreens"],
+        ["Rice", "SpicyChicken", "KelpTofuSoup", "StirFriedGreens"],
+        ["Rice", "GrilledFish", "CucumberSalad"],
+        ["Hotpot", "CucumberSalad"],
     ],
 }
 
@@ -605,8 +674,14 @@ def install() -> int:
         if key in _f.FOODS:
             continue
         kcal = round(4 * carb + 4 * prot + 9 * fat + 7 * alc)
+        # v1.4.0：膳食纤维与四种微量营养素走类别画像（B 级估算，见
+        # nutrient_profile.py 的三级法与可信度声明）。
+        micro = _np.profile_for(key, label, group, carb, prot, fat, kcal)
         _f.FOODS[key] = Food(key, label, group, portion, vol, water, na,
-                             carb, prot, fat, alc, caf, kcal, gi)
+                             carb, prot, fat, alc, caf, kcal, gi,
+                             fiber_g=micro["fiber_g"], k_mg=micro["k_mg"],
+                             ca_mg=micro["ca_mg"], fe_mg=micro["fe_mg"],
+                             vc_mg=micro["vc_mg"])
         added += 1
 
     # 别名：长词优先，且本表覆盖旧表（原来「奶茶」映射到 Milk，这里改指 MilkTea）

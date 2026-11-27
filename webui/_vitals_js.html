@@ -1,0 +1,176 @@
+<script>
+(function () {
+  'use strict';
+
+  var STATE = { blood: null, nutrition: null };
+
+  function $(id) { return document.getElementById(id); }
+  function txt(id, v) { var el = $(id); if (el) el.textContent = v; }
+
+  function showError(msg) {
+    var box = $('err');
+    if (!msg) { if (box) box.classList.remove('on'); return; }
+    if (box) box.classList.add('on');
+    txt('err-text', msg);
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  function fmt(v) {
+    var n = Number(v);
+    if (!isFinite(n)) return esc(v);
+    if (Number.isInteger(n)) return String(n);
+    return n.toFixed(Math.abs(n) < 10 ? 3 : 1).replace(/0+$/, '').replace(/\.$/, '');
+  }
+
+  function renderGroups(boxId, groups) {
+    var box = $(boxId);
+    if (!box) return;
+    if (!groups || !groups.length) { box.innerHTML = '<div class="lb-empty">没有可展示的分组</div>'; return; }
+    box.innerHTML = groups.map(function (g) {
+      var rows = (g.rows || []).map(function (r) {
+        var ref = r.ref ? ' <em style="font-style:normal;opacity:.55">(' + esc(r.ref) + ')</em>' : '';
+        return '<div class="lb-kv' + (r.tone === 'warn' ? ' lb-kv-warn' : '') + '">' +
+          '<span>' + esc(r.label) +
+          (r.unit ? ' <em style="font-style:normal;opacity:.6">' + esc(r.unit) + '</em>' : '') + ref +
+          '</span><span>' + fmt(r.value) + '</span></div>';
+      }).join('');
+      return '<div><div class="lb-subhd">' + esc(g.title) +
+        '<span style="font-weight:400;opacity:.7"> · ' + esc(g.subtitle || '') + '</span></div>' +
+        rows + '</div>';
+    }).join('');
+  }
+
+  function renderIllbar() {
+    var b = STATE.blood || {};
+    var notes = b.notes || [];
+    var bar = $('illbar');
+    if (!bar) return;
+    if (!notes.length) {
+      bar.classList.remove('on');
+      bar.classList.remove('err');
+      txt('illbar-text', '没有感染、没有出血、血红蛋白正常');
+      txt('illbar-meta', '体温 ' + fmt(b.temp) + ' ℃');
+      return;
+    }
+    bar.classList.add('on');
+    txt('illbar-text', notes.join('；'));
+    txt('illbar-meta', '体温 ' + fmt(b.temp) + ' ℃ · 致热 ' + fmt(b.fever_drive) + ' ℃');
+  }
+
+  function renderNutrition() {
+    var d = STATE.nutrition || {};
+    var score = Number(d.score || 0);
+    var ring = $('score-ring');
+    if (ring) {
+      var turn = Math.max(0, Math.min(100, score)) / 100;
+      var color = score >= 70 ? 'var(--status-good)' : (score >= 45 ? 'var(--status-warn)' : 'var(--status-crit)');
+      ring.style.background = 'conic-gradient(' + color + ' ' + turn + 'turn, var(--lb-soft) ' + turn + 'turn)';
+    }
+    txt('score-num', score ? score.toFixed(0) : '—');
+
+    // 三大供能比
+    var shares = [];
+    (d.groups || []).forEach(function (g) {
+      (g.rows || []).forEach(function (r) {
+        if (r.field === 'protein_share' || r.field === 'fat_share' || r.field === 'carb_share') shares.push(r);
+      });
+    });
+    var names = { protein_share: '蛋白', fat_share: '脂肪', carb_share: '碳水' };
+    var colors = { protein_share: 'var(--series-1)', fat_share: 'var(--series-4)', carb_share: 'var(--series-3)' };
+    var box = $('macro-bars');
+    if (box) {
+      box.innerHTML = shares.map(function (r) {
+        var pct = Math.max(0, Math.min(100, Number(r.value) || 0));
+        return '<div class="lb-macro-row"><span>' + names[r.field] + '</span>' +
+          '<span class="lb-macro-bar"><i style="width:' + pct + '%;background:' + colors[r.field] + '"></i></span>' +
+          '<b>' + fmt(r.value) + '%</b></div>';
+      }).join('');
+    }
+    txt('macro-text', shares.map(function (r) { return names[r.field] + ' ' + fmt(r.value) + '%'; }).join(' / ') || '—');
+
+    var flags = (d.flags || []).map(function (f) { return '<span class="lb-flag">' + esc(f) + '</span>'; });
+    if (!flags.length) flags = ['<span class="lb-flag ok">各项达标</span>'];
+    var fb = $('nut-flags');
+    if (fb) fb.innerHTML = flags.join('');
+
+    renderGroups('nut-groups', d.groups);
+
+    // 习惯：符合 / 未符合
+    var on = [], off = [];
+    (d.habits || []).forEach(function (h) { (h.active ? on : off).push(h); });
+    txt('habit-on-count', on.length);
+    txt('habit-note', '共 ' + ((d.habits || []).length) + ' 项 · 从状态反推，不产生任何生理后果');
+
+    function item(h, active) {
+      var cls = 'lb-habit ' + (active ? 'on ' + (h.polarity > 0 ? 'pos' : 'neg') : 'off');
+      var tag = h.proxy ? ' <span class="lb-tag">代理</span>' : '';
+      var pol = h.polarity > 0 ? '正向' : '负向';
+      var ev = h.evidence ? '<div class="lb-habit-ev">' + esc(h.evidence) + '</div>' : '';
+      var desc = '<div class="lb-habit-ev">' + esc(h.desc) + ' · ' + pol + tag + '</div>';
+      return '<div class="' + cls + '"><span>' + (active ? (h.polarity > 0 ? '✓' : '!') : '·') + '</span>' +
+        '<div><span class="lb-habit-name">' + esc(h.label) + '</span>' + ev + desc + '</div></div>';
+    }
+    var onBox = $('habit-on'), offBox = $('habit-off');
+    if (onBox) onBox.innerHTML = on.length ? on.map(function (h) { return item(h, true); }).join('') : '<div class="lb-empty">暂无</div>';
+    if (offBox) offBox.innerHTML = off.length ? off.map(function (h) { return item(h, false); }).join('') : '<div class="lb-empty">暂无</div>';
+  }
+
+  async function loadBlood() {
+    try {
+      var res = await window.maibot.query('blood', {});
+      if (res && res.success === false) { showError(res.error || 'blood 失败'); return; }
+      STATE.blood = res || {};
+      showError('');
+      renderGroups('blood-groups', STATE.blood.groups);
+      renderIllbar();
+      var c = STATE.blood.clock || {};
+      txt('hdr-clock', (c.time || '') + ' · 第 ' + (c.day || 1) + ' 天 · ' + (c.phase || ''));
+    } catch (e) {
+      showError('拉取血液数据失败：' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function loadNutrition() {
+    try {
+      var res = await window.maibot.query('nutrition', {});
+      if (res && res.success === false) { showError(res.error || 'nutrition 失败'); return; }
+      STATE.nutrition = res || {};
+      renderNutrition();
+    } catch (e) {
+      showError('拉取营养数据失败：' + (e && e.message ? e.message : e));
+    }
+  }
+
+  function boot() {
+    var n = $('btn-now'); if (n) n.addEventListener('click', function () { window.maibot.navigate('now', {}); });
+    var o = $('btn-organs'); if (o) o.addEventListener('click', function () { window.maibot.navigate('organs', {}); });
+
+    // 宿主限制同时只能有 2 个 pending 请求，这里串行加载。
+    var loading = false;
+    async function loadAll() {
+      if (loading) return;
+      loading = true;
+      try {
+        await loadBlood();
+        await loadNutrition();
+      } catch (e) {
+        console.warn('页面加载异常', e);
+      } finally {
+        loading = false;
+      }
+    }
+    var r = $('btn-refresh');
+    if (r) r.addEventListener('click', function () { loadAll(); });
+    loadAll();
+    setInterval(loadAll, 15000);
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+})();
+</script>

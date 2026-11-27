@@ -126,6 +126,7 @@
     <div class="lb-actions">
       <button type="button" class="lb-btn" id="btn-now">← 此刻</button>
       <button type="button" class="lb-btn" id="btn-organs">内脏细则 →</button>
+      <button type="button" class="lb-btn" id="btn-vitals">血液与习惯 →</button>
       <button type="button" class="lb-btn lb-btn-primary" id="btn-refresh">刷新</button>
     </div>
   </header>
@@ -471,6 +472,8 @@
     if (now) now.addEventListener('click', function () { window.maibot.navigate('now', {}); });
     var og = $('btn-organs');
     if (og) og.addEventListener('click', function () { window.maibot.navigate('organs', {}); });
+    var vt = $('btn-vitals');
+    if (vt) vt.addEventListener('click', function () { window.maibot.navigate('vitals', {}); });
     var rf = $('btn-refresh');
     if (rf) rf.addEventListener('click', function () { loadHistory(); loadEvents(); });
     var sel = $('sel-hours');

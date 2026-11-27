@@ -14,6 +14,7 @@
     <div class="lb-actions">
       <button type="button" class="lb-btn" id="btn-timeline">时间线 →</button>
       <button type="button" class="lb-btn" id="btn-organs">内脏细则 →</button>
+      <button type="button" class="lb-btn" id="btn-vitals">血液与习惯 →</button>
       <button type="button" class="lb-btn lb-btn-primary" id="btn-refresh">刷新实况</button>
     </div>
   </header>
@@ -67,6 +68,11 @@
   <div class="lb-grid" style="grid-template-columns:1.4fr 1fr;margin-bottom:14px" id="sleep-cycle-grid">
     <section class="lb-card">
       <div class="lb-card-hd"><h2>睡眠结构</h2><span class="lb-card-sub" id="sl-stage">—</span></div>
+      <!-- 2026-11-26：v1.4.0 起「一整夜」是独立口径 —— 同一夜被中途醒来打断的
+           几段 bout 已经合并（见 engine._merge_into_night），这里显示的是合并后
+           的整夜，而不是「当前这一觉」。睡眠中的实时分期另占一行。 -->
+      <div class="lb-gut-row"><span>最近一夜</span><b id="sl-night">—</b></div>
+      <div class="lb-gut-row"><span>整夜构成</span><b id="sl-night-split">—</b></div>
       <div class="lb-gut-row"><span>当前周期</span><b id="sl-cycle">—</b></div>
       <div class="lb-sleep-bar" id="sl-bar"></div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px">

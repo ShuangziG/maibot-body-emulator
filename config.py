@@ -16,7 +16,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用插件", "order": 1},
     )
     config_version: str = Field(
-        default="1.3.2",
+        default="1.4.0",
         description="配置版本，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True, "order": 0},
     )
@@ -239,6 +239,16 @@ class ExerciseConfig(PluginConfigBase):
         default=6.0,
         description="昨晚睡眠少于这个小时数时不运动（熬夜次日不晨跑）",
         json_schema_extra={"label": "最低睡眠时长（小时）", "group": "运动", "order": 3},
+    )
+    auto_per_week: float = Field(
+        default=4.0,
+        description=(
+            "自己安排运动的频率（次/周）。0 = 只在你/日程要求时才运动（v1.3.1 的行为）。"
+            "填 4 表示每周自己安排 4 次，程式按周一/周四力量、周日瑜伽、其余有氧轮换。"
+            "这项存在的原因：「有氧运动/力量训练/健身爱好者/久坐」四项生活习惯"
+            "没有它永远判不出来"
+        ),
+        json_schema_extra={"label": "自主运动频率（次/周）", "group": "日常锻炼", "order": 0},
     )
 
 
@@ -538,6 +548,193 @@ class EmotionConfig(PluginConfigBase):
     )
 
 
+class BloodConfig(PluginConfigBase):
+    """血液（v1.4.0）：血容量、红细胞生成、铁与血小板。
+
+    血容量由血浆量与红细胞量共同决定。血浆量跟总体水走（守恒），
+    红细胞量是独立状态 —— 失血时红细胞要靠骨髓几周才能补回来，
+    混成一个量就表达不出"失血后 Hb 慢慢降、补液后反而被稀释"。
+    """
+
+    __ui_label__ = "血液"
+    __ui_icon__ = "droplet"
+    __ui_order__ = 12
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "启用血液系统：血浆量/红细胞量分账、血红蛋白与红细胞压积、"
+            "促红素驱动的红细胞生成、铁储备与吸收、血小板与凝血。"
+            "关闭后这些字段不再推进（界面仍显示，但相当于冻结）"
+        ),
+        json_schema_extra={"label": "启用血液系统", "group": "基本", "order": 0},
+    )
+    accident_per_day: float = Field(
+        default=0.03,
+        description=(
+            "每日发生一次意外出血的概率（0 = 永不）。默认 0.03 约合每月一次，"
+            "单次失血上限 350 mL（约 9% 血容量，I 级失血，不会休克）。"
+            "调到 0 即只有经期失血"
+        ),
+        json_schema_extra={"label": "意外出血概率（/天）", "group": "失血", "order": 0},
+    )
+    accident_max_ml: float = Field(
+        default=350.0,
+        description=(
+            "单次意外出血上限（mL）。真人 I 级失血（<15% 血容量）不引起生命体征"
+            "改变；超过 750 mL 才进入 II 级。默认值刻意留在 I 级，避免随机事件把人打垮"
+        ),
+        json_schema_extra={"label": "单次出血上限（mL）", "group": "失血", "order": 1},
+    )
+    menstrual_gain: float = Field(
+        default=1.0,
+        description=(
+            "经血量的倍率（仅月经周期开启时有效）。人群经血中位数约 35 mL/周期，"
+            ">80 mL 属月经过多。0 表示不因行经失血（仅激素周期仍照常）"
+        ),
+        json_schema_extra={"label": "经血量倍率", "group": "失血", "order": 2},
+    )
+
+
+class ImmuneConfig(PluginConfigBase):
+    """免疫（v1.4.0）：白细胞三分类、感染-炎症-发热闭环、生病行为。
+
+    白细胞只建三类（中性粒/淋巴/单核）：不同病原的应答方向不同，
+    细菌升中性粒、病毒升淋巴；再往下的亚群对本模型没有增量。
+    """
+
+    __ui_label__ = "免疫"
+    __ui_icon__ = "shield"
+    __ui_order__ = 13
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "启用免疫系统：白细胞三分类计数、感染（自限曲线）、IL-6 与 CRP "
+            "两级延迟、发热调定点、生病行为（乏力/没胃口/心境低）"
+        ),
+        json_schema_extra={"label": "启用免疫系统", "group": "基本", "order": 0},
+    )
+    infection_per_day: float = Field(
+        default=0.012,
+        description=(
+            "每日发生一次感染的基础概率。成年常见呼吸道感染约 2~4 次/年，"
+            "0.012 约合 4.4 次/年；实际概率还会按免疫张力（睡眠/应激/运动/膳食）"
+            "与感染后短期抵抗上下浮动。0 = 永不感染"
+        ),
+        json_schema_extra={"label": "感染概率（/天）", "group": "感染", "order": 0},
+    )
+    fever_gain: float = Field(
+        default=1.0,
+        description="发热幅度倍率。1.0 时一般感染升至 37.8~38.5 ℃；调低更温和",
+        json_schema_extra={"label": "发热幅度倍率", "group": "感染", "order": 1},
+    )
+    immune_sensitivity: float = Field(
+        default=1.0,
+        description=(
+            "免疫张力对易感性的影响强度。1.0 = 按文献方向：睡眠不足/慢性应激降低、"
+            "规律运动与良好膳食提高；0 = 完全不受这些因素影响"
+        ),
+        json_schema_extra={"label": "易感性强度", "group": "感染", "order": 2},
+    )
+
+
+class NutritionConfig(PluginConfigBase):
+    """膳食营养结构（v1.4.0）：供能比、膳食纤维、钾钙铁维C、膳食质量分。
+
+    推荐量取成年女性：蛋白 1.0 g/kg、脂肪供能 20%~30%、碳水 50%~65%、
+    纤维 25 g、钾 2000 mg、钙 800 mg、铁 18 mg、维C 100 mg、钠 <2000 mg。
+    评分口径参照 HEI-2015 的思路（对齐推荐量给分），不是自创阈值。
+    """
+
+    __ui_label__ = "膳食营养"
+    __ui_icon__ = "apple"
+    __ui_order__ = 14
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "启用膳食营养结构：按日累计能量与三大供能比、纤维、钾/钙/铁/维C/钠，"
+            "算出 0~100 的膳食质量分与缺乏项标记。分数会喂给习惯判定、"
+            "铁吸收与免疫张力"
+        ),
+        json_schema_extra={"label": "启用膳食营养", "group": "基本", "order": 0},
+    )
+    height_cm: float = Field(
+        default=162.0,
+        description=(
+            "身高（cm），只用于把体重折算成 BMI —— 不影响任何生理计算。"
+            "BMI 判定用中国标准：<18.5 偏瘦、18.5~23.9 正常、24~27.9 超重、≥28 肥胖"
+        ),
+        json_schema_extra={"label": "身高（cm）", "group": "身体参数", "order": 0},
+    )
+    reference_weight_kg: float = Field(
+        default=55.0,
+        description=(
+            "派生体重的起点（kg）。体重 = 这个值 + 累计能量盈亏 ÷ 7700。"
+            "它只用于 BMI 与「超重/肥胖」判定，不参与血糖、血容量等任何计算"
+        ),
+        json_schema_extra={"label": "参考体重（kg）", "group": "身体参数", "order": 1},
+    )
+    junk_share_threshold: float = Field(
+        default=0.30,
+        description=(
+            "「垃圾食品成瘾」的能量占比门槛。高油/高钠/高糖食物（见 "
+            "body/nutrient_profile.py 的三条判据）提供的能量超过这个比例、"
+            "且连续 3 天以上，才判为成瘾"
+        ),
+        json_schema_extra={"label": "垃圾食品占比门槛", "group": "判定", "order": 0},
+    )
+
+
+class HabitsConfig(PluginConfigBase):
+    """生活习惯（v1.4.0）：从状态反推，不是选项。
+
+    16 项（9 正向 / 7 负向）全部由生理状态判定，**零副作用** ——
+    判定结果只用于展示与提示注入，不会反过来改变任何生理量。
+    """
+
+    __ui_label__ = "生活习惯"
+    __ui_icon__ = "list-checks"
+    __ui_order__ = 15
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "启用生活习惯判定：松弛/瑜伽/冥想/规律睡眠/适量饮水/健康饮食/"
+            "有氧运动/力量训练/健身爱好者 + 营养不良/脱水/超重/肥胖/久坐/"
+            "垃圾食品成瘾/工作狂。判定纯读状态，不产生任何生理后果"
+        ),
+        json_schema_extra={"label": "启用习惯判定", "group": "基本", "order": 0},
+    )
+    relax_stress_max: float = Field(
+        default=35.0,
+        description=(
+            "「放松状态」的压力上限。清醒、压力低于此值、心率不高、且未在运动，"
+            "持续一段时间就判为处于放松状态（冥想/松弛由此反推）"
+        ),
+        json_schema_extra={"label": "放松压力上限", "group": "判定阈值", "order": 0},
+    )
+    aerobic_week_min: float = Field(
+        default=150.0,
+        description="「有氧运动」的每周分钟门槛。150 分钟/周是 WHO 2020 活动指南的下限量级",
+        json_schema_extra={"label": "有氧周门槛（分钟）", "group": "判定阈值", "order": 1},
+    )
+    strength_week_sessions: int = Field(
+        default=2,
+        description="「力量训练」的每周次数门槛。2 次/周是抗阻训练的常见最低建议",
+        json_schema_extra={"label": "力量周次数", "group": "判定阈值", "order": 2},
+    )
+    inject_prompt: bool = Field(
+        default=True,
+        description=(
+            "是否把当前命中的生活习惯写进身体提示词。开启后模型会知道自己"
+            "「这周有 3 天在熬夜」或「最近钙摄入偏低」，便于自然地说出来"
+        ),
+        json_schema_extra={"label": "注入提示词", "group": "提示词", "order": 0},
+    )
+
+
 class LifeBodyConfig(PluginConfigBase):
     """麦麦身体插件配置。"""
 
@@ -553,3 +750,8 @@ class LifeBodyConfig(PluginConfigBase):
     excretion: ExcretionConfig = Field(default_factory=ExcretionConfig)
     emotion: EmotionConfig = Field(default_factory=EmotionConfig)
     conflict: ConflictConfig = Field(default_factory=ConflictConfig)
+    # v1.4.0 新增四段（血液/免疫/膳食营养/生活习惯），默认全开
+    blood: BloodConfig = Field(default_factory=BloodConfig)
+    immune: ImmuneConfig = Field(default_factory=ImmuneConfig)
+    nutrition: NutritionConfig = Field(default_factory=NutritionConfig)
+    habits: HabitsConfig = Field(default_factory=HabitsConfig)

@@ -17,6 +17,16 @@
     border:1px dashed var(--lb-border);background:transparent;color:var(--lb-muted);
     font-size:11px;font-family:inherit;cursor:pointer;transition:.15s;text-align:center}
   .lb-more:hover{color:var(--lb-fg);border-color:var(--lb-primary)}
+  /* 2026-11-27（1.4.1-dev）：食物库搜索 / 排序 / 分页 */
+  .lb-food-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0 0}
+  .lb-input{flex:1 1 220px;min-width:160px;padding:7px 11px;border-radius:8px;border:1px solid var(--lb-border);
+    background:var(--lb-surface);color:var(--lb-fg);font-size:12px;font-family:inherit;outline:none}
+  .lb-input:focus{border-color:var(--lb-primary)}
+  .lb-table th.sortable{user-select:none;cursor:pointer}
+  .lb-table th.sortable:hover{color:var(--lb-fg)}
+  .lb-pager{display:flex;gap:10px;align-items:center;margin-top:10px}
+  .lb-pager-text{font-size:11px;color:var(--lb-muted)}
+  .lb-chip[disabled]{opacity:.45;cursor:not-allowed}
   .lb-wave-wrap{margin-top:6px}
   .lb-wave-label{font-size:12px;color:var(--lb-muted);margin-bottom:4px}
   .lb-wave-label span{color:var(--lb-fg);margin-left:6px}

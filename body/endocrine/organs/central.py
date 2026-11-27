@@ -14,6 +14,7 @@ APK 依据（il2cpp 元数据，见 apk_report/il2cpp_strings.txt）：
 from ..base import hormone, receptor, register, seat
 from ...dynamics import approach
 from ...state import clamp
+from ...blood import BV_REF_ML
 
 ORGAN = ("central", "下丘脑 · 垂体", "释放激素与促激素")
 
@@ -124,7 +125,9 @@ def step_adh(s, dt):
     即"喝酒利尿"。语义上它属于垂体后叶，故落在本模块。
     """
     dif = s.osmol - 290.0
-    vol_suppress = clamp(5000.0 / max(s.blood_vol, 3800.0), 0.55, 2.0)
+    # v1.4.0：参考血容量由 5000 改 BV_REF_ML（4000）。三个公式都是"相对参考值的
+    # 比值"，换常量后基线行为不变，但失血/贫血有了正确的分母。
+    vol_suppress = clamp(BV_REF_ML / max(s.blood_vol, BV_REF_ML * 0.76), 0.55, 2.0)
     adh_t = clamp((1.0 + dif * 0.15) * vol_suppress, 0.05, 4.0)
     if s.bac > 0.0:
         adh_t = clamp(adh_t * (1.0 - 0.62 * clamp(s.bac / 1.0, 0.0, 1.0)),

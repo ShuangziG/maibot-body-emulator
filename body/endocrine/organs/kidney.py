@@ -11,6 +11,7 @@ APK 依据：
 from ..base import hormone, receptor, register, seat
 from ...dynamics import approach
 from ...state import clamp
+from ...blood import BV_REF_ML
 
 ORGAN = ("kidney", "肾脏", "RAAS 与活性维生素 D")
 
@@ -48,7 +49,7 @@ def step_raas(s, dt):
     驱动：血容量不足、平均动脉压偏低。醛固酮的保钠动作不在这里 ——
     它必须与 engine 的排钠同处计算才能守恒。
     """
-    renin_t = clamp(1.0 + (1.0 - s.blood_vol / 5000.0) * 3.0
+    renin_t = clamp(1.0 + (1.0 - s.blood_vol / BV_REF_ML) * 3.0
                     + (90.0 - s.map) / 40.0, 0.2, 4.0)
     s.renin = approach(s.renin, renin_t, dt, "raas")
     s.ang2 = approach(s.ang2, clamp(s.renin * 1.2, 0.2, 3.0), dt, "ang2")

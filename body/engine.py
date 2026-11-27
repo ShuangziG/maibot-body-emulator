@@ -15,6 +15,13 @@ from .state import BodyState, clamp
 from .events import Event, EventBus
 from . import food
 from . import endocrine
+# v1.4.0 新增子系统：血液 / 免疫 / 营养结构 / 生活习惯。
+# 四者与 endocrine 同构（纯函数推进 state），故 engine 只负责调用顺序。
+from . import blood
+from . import immune
+from . import nutrient_profile as nutprof
+from . import nutrition
+from . import habits
 
 # 数值底座已抽到 dynamics.py（2026-11-18 结构规整）。
 # 这里 re-export 同名符号，保证 engine 内部 20 余处 _tau()/approach() 调用
@@ -108,6 +115,17 @@ EX_VCO2_MID = 0.35        # 中强度额外 CO2 产生量（L/min）
 EX_VCO2_HIGH = 0.60
 EX_TEMP_MID = 0.55        # 中强度产热（℃）
 EX_TEMP_HIGH = 1.10       # 高强度产热（℃）
+
+# ---- 低强度档（v1.4.0 新增：瑜伽/拉伸）----
+# 为什么需要第三档：v1.4.0 要做"生活习惯"判定，其中"瑜伽"必须是
+# **真实发生过的低强度身体活动**，而不是贴个标签。此前 request_exercise
+# 一律按 mid 处理（见该方法的注释），模型里只有中/高两档。
+# 定量：瑜伽/柔和拉伸约 2.5~3.5 MET，对应 40%~45% HRmax、呼吸与产热
+# 都远低于慢跑（慢跑 60% HRmax）。取 0.45、+3 次/分、+0.12 L/min、+0.18 ℃。
+HR_EX_FRAC_LOW = 0.45     # 瑜伽/拉伸 ≈ 45% HRmax
+EX_RR_LOW = 3.0
+EX_VCO2_LOW = 0.12
+EX_TEMP_LOW = 0.18
 SWEAT_COOL = 0.35         # 出汗蒸发的散热权重（℃，sweat=1 时）
 
 # 葡萄糖有效性（glucose effectiveness，S_G）：不依赖胰岛素的被动摄取。
@@ -265,6 +283,31 @@ class BodyEngine:
         # 食单选择用固定种子，保证同一 seed 的 30 天回归可复现
         self.rng = random.Random(getattr(self.s, "_seed", 20261106))
 
+        # ---- v1.4.0 新系统开关（默认全开，各带独立开关）----
+        # 与既往"默认关闭的实验特性"（如情绪感知 NLP）不同：这三套是模型的
+        # 生理组成，关掉会得到一个缺血液/缺免疫的身体，因此默认开启。
+        self.blood_enabled = True
+        self.immune_enabled = True
+        self.nutrition_enabled = True
+        self.habits_enabled = True
+        # 意外出血：每日发生概率（0 = 永不）。默认 0.03（约一月一次），
+        # 单次上限 350 mL（<9% 血容量，I 级失血，不会休克）。
+        self.bleed_accident_per_day = 0.03
+        self.bleed_accident_max_ml = 350.0
+        # 自动运动：每周安排几次。0 = 完全交给外部日程（旧行为）。
+        # 默认 4 次/周，是成年人"规律锻炼"的常见量级；没有它，
+        # "有氧运动/力量训练/健身爱好者/久坐"四项习惯永远判不出来。
+        self.auto_exercise_per_week = 4.0
+        self._auto_ex_week = 0.0      # 本周已安排次数（7 日滑窗）
+        self._auto_ex_last_t = -99999.0
+        # 错过的饭点（v1.4.0）：睡着时跨过饭点不补吃，但醒来后应当补上。
+        # 没有这一条时，"2:00 睡 9:00 起"的作息每天只吃 2 顿（早餐被睡过去），
+        # 30 天回归里糖原一路清零、健康跌到 25 并反复送医 —— 这在 v1.3.0
+        # 里同样存在（基线实测 5 次送医、最低健康 24.7），属于既有缺陷。
+        self._missed_meal = 0.0
+        # 身高：只用于 BMI 派生（营养侧），不影响任何生理计算。
+        self.height_cm = 162.0
+
     # ------------------------------------------------------------------
     # 内置时钟：把 s.hour 对齐到系统墙钟
     # ------------------------------------------------------------------
@@ -314,9 +357,24 @@ class BodyEngine:
         self._void()
         self._stool()
         self._endocrine(dt)
+        # ---- v1.4.0：血液 -> 免疫 -> 营养 -> 体温 ----
+        # 顺序有讲究：
+        #   血液放在内分泌之后，才能用上本步刚更新的 RAAS/ADH 张力；
+        #   免疫放在血液之后，因为它要读铁储备与白细胞（炎症性贫血）；
+        #   营养在免疫之前算也可以，但评分要用本步已定的活动量，放这里无妨；
+        #   体温必须在免疫之后 —— 致热驱动是免疫刚算出来的。
+        if self.blood_enabled:
+            blood.step(s, dt, bus=None, cycle_enabled=bool(self.cycle_enabled))
+        if self.immune_enabled:
+            immune.step(s, dt, self.rng)
+        if self.nutrition_enabled:
+            nutrition.step(s, dt, self.height_cm)
         self._thermo(dt)
         self._affect(dt)
         self._health(dt)
+        if self.habits_enabled:
+            # 习惯判定放在健康之后：它只读最终状态，不参与任何生理推进
+            habits.step(s, dt, baseline_hr=self._hr_rest_baseline())
         self._rescue(dt)
         self._alerts()
 
@@ -564,8 +622,10 @@ class BodyEngine:
             if s.t - s.wake_since >= hold:
                 # 安静够了，允许重新入睡。清除标记，走正常入睡流程。
                 s.wake_pending = False
-                # 重新入睡从浅睡周期的起点开始
-                s.stage_index = 0
+                # 2026-11-26：**不再**把 stage_index 归零。
+                # 同一夜内被叫醒再睡回去，NREM-REM 周期是接着数的 ——
+                # 真实睡眠里醒来几分钟不会让周期重来，整夜仍然是 4~6 个周期。
+                # 归零只发生在「换了一夜」（见下面 onset 分支的 _night_key 判断）。
                 s.stage_elapsed = 0.0
                 s.cycle_pos = 0.0
             else:
@@ -591,8 +651,14 @@ class BodyEngine:
             if s.sleep_depth > 0.5:
                 resumed = s.sleep_onset_t > 0.0 and s.wake_count > 0
                 s.sleeping = True
-                # 重新入睡一律从浅睡开始；首次入睡同样从浅睡
-                s.stage_index = 0
+                # 2026-11-26：周期序号只在「换了一夜」时归零。
+                # 旧实现每次入睡都归零，导致同一夜中断一次就重数，
+                # WebUI 的「第 N 周期」永远显示第 1 个。
+                # 判据用「这一段 bout 归属的夜」与上一段是否相同。
+                _nt = self._night_key(s.t)
+                if getattr(s, "stage_night_key", None) != _nt:
+                    s.stage_index = 0
+                    s.stage_night_key = _nt
                 s.stage_elapsed = 0.0
                 s.cycle_pos = 0.0
                 s.sleep_stage = "light"
@@ -618,11 +684,10 @@ class BodyEngine:
                     s.wake_by_message = s.wake_by_thirst = s.wake_by_bladder = 0
                     s.sleep_bout_start_t = s.t
                     s.sleep_bout_wakes = 0
-                    s.sleep_bout_light_sec = 0.0
-                    s.sleep_bout_deep_sec = 0.0
-                    s.sleep_bout_rem_sec = 0.0
-                    s.sleep_bout_awake_sec = 0.0
-                    s.sleep_bout_stage_sec = 0.0
+                    # 记下本段 bout 的周期基线（周期序号按夜累计）
+                    s.sleep_bout_cycle_base = int(s.stage_index)
+                    # 账本清零统一走 _reset_bout_ledger()，避免两处口径漂移
+                    self._reset_bout_ledger()
                 if not resumed:
                     s.sleep_onset_t = s.t
                 # 2026-11-16 修真实 bug：原文是 s.last_sleep_t = s.last_sleep_t or s.t，
@@ -709,20 +774,33 @@ class BodyEngine:
     exercise_min_sleep_hours: float = 6.0
 
     # 不适合运动的身体/环境条件。返回拒绝原因，空串表示可以运动。
-    def exercise_block_reason(self) -> str:
+    def exercise_block_reason(self, style: str = "") -> str:
         """判断现在能不能运动。麦生活的日程是 LLM 编的，
-        外面暴晒/刮风/正在痛经时硬跑没道理，所以这里做一次否决。"""
+        外面暴晒/刮风/正在痛经时硬跑没道理，所以这里做一次否决。
+
+        v1.4.0：门槛按**程式**分级。依据 [R3] Cheung 2003 —— DOMS 期间
+        的建议是"降低强度并做低冲击活动"，而不是完全不动；旧实现一刀切
+        （酸痛 > 30 就全部否决），后果是引擎自己安排了力量训练之后，
+        接下来一周任何运动都做不了，习惯判定里"有氧/瑜伽"永远判不出来。
+        因此：
+          力量（strength）  疼痛 > 35 / 酸痛 > 30  —— 保持最严
+          有氧（cardio）    疼痛 > 40 / 酸痛 > 45  —— 酸痛期可以慢走
+          瑜伽（yoga）      疼痛 > 55 / 酸痛 > 70  —— 拉伸本身即恢复手段
+        不传 style 时按有氧口径处理（外部日程默认是"跑"）。
+        """
 
         s = self.s
+        key = style if style in ("cardio", "strength", "yoga") else "cardio"
+        pain_lim = {"strength": 35.0, "cardio": 40.0, "yoga": 55.0}[key]
+        doms_lim = {"strength": 30.0, "cardio": 45.0, "yoga": 70.0}[key]
         if s.hospital_until > s.t:
             return "正在住院"
         if s.health < 45.0:
             return f"身体太虚（健康 {s.health:.0f}）"
-        if s.pain > 35.0:
+        if s.pain > pain_lim:
             return f"正在疼痛（{s.pain:.0f}/100），不适合运动"
-        # DOMS 期间肌肉微损伤未修复，继续运动会加重（[R3] Cheung 2003 明确
-        # 建议 DOMS 后 1-2 天降低强度）。这里用 30 分做门槛。
-        if float(getattr(s, "doms", 0.0) or 0.0) > 30.0:
+        # DOMS 期间肌肉微损伤未修复，继续大强度运动会加重（[R3] Cheung 2003）。
+        if float(getattr(s, "doms", 0.0) or 0.0) > doms_lim:
             return f"肌肉还在酸痛（{s.doms:.0f}/100），需要恢复"
         if s.sleeping:
             return "正在睡觉"
@@ -824,7 +902,8 @@ class BodyEngine:
             import random as _r
             return float(_r.uniform(lo, hi))
 
-    def request_exercise(self, level: str, duration_min: float = 30.0) -> bool:
+    def request_exercise(self, level: str, duration_min: float = 30.0,
+                         style: str = "") -> bool:
         """外部（日程）请求运动。返回是否接受。
 
         接受后不是立刻开始跑：由 _exercise_tick 按间歇节奏驱动，
@@ -840,10 +919,18 @@ class BodyEngine:
             return False
         cap = max(5.0, float(self.exercise_max_minutes))
         minutes = min(max(5.0, float(duration_min)), cap)
-        # 2026-11-17：一律按**慢跑**处理。日程只能回答「要不要跑」，给不出配速/
-        # 距离/间歇结构，据此切强度档只是假装知道。强度分档的代码保留，
-        # 等有了可靠的烈度来源再接。见 docs/issues/issue_运动烈度无法控制.md
-        level = "mid"
+        # 2026-11-17：外部日程只回答「要不要跑」，给不出配速/距离/间歇结构，
+        # 据此切强度档只是假装知道，因此默认一律按**慢跑（mid）**处理。
+        #
+        # 2026-11-24（v1.4.0）：新增 style 参数，只给**引擎自己**用（自主运动
+        # 安排，见 _auto_ex_tick）。style 是"做了什么"，不是"多用力"，
+        # 它到强度的映射是固定的：cardio -> mid、strength -> high、
+        # yoga -> low。外部不传 style 时行为与 v1.3.1 逐位一致。
+        s.exercise_style = style if style in ("cardio", "strength", "yoga") else ""
+        if s.exercise_style:
+            level = {"cardio": "mid", "strength": "high", "yoga": "low"}[s.exercise_style]
+        else:
+            level = "mid"
         s.exercise_intent = level
         s.exercise_until = s.t + minutes * 60.0
         # 强度决定间歇：高强度跑短歇长，中等反过来
@@ -862,10 +949,27 @@ class BodyEngine:
         s.exercise_start_t = s.t
         s.last_exercise_t = s.t
         s._next_phase_change = s.t + s.exercise_on_phase
+        if s.exercise_style == "strength":
+            s.ex_week_strength_sessions = float(getattr(s, "ex_week_strength_sessions", 0.0) or 0.0) + 1.0
         self.bus.emit(Event(s.t, "exercise_start", "info",
                             f"开始运动（{level}）",
                             {"level": level, "minutes": round(minutes, 1)}))
         return True
+
+    def _ex_level(self) -> str:
+        """当前运动强度档：low / mid / high。
+
+        集中成一个方法，是因为强度在 5 个子系统里都要读（心率、呼吸、
+        代谢产乳酸、体温、DOMS）。散落成 5 处 getattr 比较，改档位时
+        必漏一处 —— v1.3.0 之前"高强度与中强度差 0 bpm"就是这么来的。
+        """
+        lvl = str(getattr(self.s, "exercise_intent", "") or "mid").lower()
+        return lvl if lvl in ("low", "mid", "high") else "mid"
+
+    def _hr_rest_baseline(self) -> float:
+        """静息心率基线（与 _cardio 的公式同源，供习惯判定的放松判据用）。"""
+        _age = float(getattr(self, "age", 18) or 18)
+        return 60.0 + 0.20 * (_age - 18.0)
 
     def _trigger_doms(self) -> None:
         """运动结束后按运动量与习惯触发 DOMS。
@@ -881,8 +985,9 @@ class BodyEngine:
         elapsed_min = max(0.0, (s.t - float(getattr(s, "exercise_start_t", s.t)))) / 60.0
         if elapsed_min < 8.0:
             return          # 太短，不构成 DOMS 刺激
-        level = str(s.exercise_intent or "mid")
-        intensity = 1.0 if level == "high" else 0.65
+        level = self._ex_level()
+        # 低强度（瑜伽/拉伸）几乎不产生 DOMS：机械负荷与离心收缩都小得多
+        intensity = 1.0 if level == "high" else (0.20 if level == "low" else 0.65)
         # 基础峰值：30 分钟高强度约 55 分酸痛
         base = clamp(elapsed_min / 30.0 * 55.0 * intensity, 0.0, 85.0)
         # 重复运动效应：习惯越好，酸痛越轻（文献 SMD 0.51-1.23）
@@ -920,6 +1025,18 @@ class BodyEngine:
             self.bus.emit(Event(s.t, "exercise_end", "info", "身体撑不住，提前结束", {}))
 
         s.exercise_cycle_t += dt
+
+        # ---- v1.4.0：按程式累计分钟数（供习惯判定，7 日滑窗在 habits 里衰减）----
+        if s.exercising:
+            _m = dt / 60.0
+            s.ex_minutes_today = float(getattr(s, "ex_minutes_today", 0.0) or 0.0) + _m
+            _style = str(getattr(s, "exercise_style", "") or "cardio")
+            if _style == "strength":
+                s.ex_week_strength_min = float(getattr(s, "ex_week_strength_min", 0.0) or 0.0) + _m
+            elif _style == "yoga":
+                s.ex_week_yoga_min = float(getattr(s, "ex_week_yoga_min", 0.0) or 0.0) + _m
+            else:
+                s.ex_week_cardio_min = float(getattr(s, "ex_week_cardio_min", 0.0) or 0.0) + _m
 
         # ---- 随机化间歇 + 疲劳调制 ----
         # 旧实现用固定 on/off 相位循环，于是每段跑步都是精确的 15 分钟、
@@ -1040,6 +1157,15 @@ class BodyEngine:
         s.wake_since = s.t
         s.wake_pending = True
         s.last_wake_reason = label
+        # 2026-11-26 修真实 bug：这里原先只置 wake_pending，**没记 bout 结束时刻**。
+        # 后果是 _flush_sleep_bout 里 `if last <= 0.0: return` 直接返回，
+        # 这一段 bout 永远不结算；等重新入睡时 prev_end 仍是旧值/0，
+        # same_bout 判否 → 账本被清零，**已经睡过的那几个小时整段丢失**。
+        # 实测：23:00 睡 3h → 被叫醒 1.5h → 再睡，最终 bouts 里只剩第二段
+        # 3.22h，前 3.22h 凭空消失（week_nights 也跟着少一夜）。
+        # 记下唤醒时刻，后面即可正常走"超过容忍间隙就结算"的路径。
+        if float(getattr(s, "sleep_bout_start_t", 0.0)) > 0.0:
+            s.sleep_bout_end_t = s.t
         self.bus.emit(Event(s.t, "wake", "info", f"夜间唤醒：{label}",
                             {"reason": reason, "count": s.wake_count}))
 
@@ -1178,6 +1304,136 @@ class BodyEngine:
             s.stage_elapsed = 0.0
             s.cycle_pos = 0.0
 
+    # ---- 「一夜」的分界（2026-11-26 新增）----
+    # 取正午 12:00 为界：凌晨 3 点入睡仍算前半夜那一晚。
+    # 用午夜 0 点会把 23:00-07:00 的整夜劈成两夜，这正是要避免的。
+    NIGHT_CUTOFF_HOUR = 12.0
+
+    def _night_key(self, t_sec: float) -> int:
+        """把仿真时刻映射到「第几夜」。同一夜的所有 bout 共享同一个 key。"""
+        total_h = float(t_sec) / H2S + float(getattr(self, "clock_offset", 0.0) or 0.0)
+        return int((total_h - self.NIGHT_CUTOFF_HOUR) // 24.0)
+
+    def rebuild_nights_from_bouts(self) -> int:
+        """从已有的 bout 历史重建夜间聚合（旧存档迁移用）。
+
+        2026-11-26 新增。存档里可能只有 sleep_bouts（升级前写入的），
+        没有 sleep_nights —— 此时 WebUI 的「最近一夜」会一直显示「—」，
+        直到下一夜结算为止（可能十几个小时）。这里按 _night_key 把 bouts
+        分组重建成 nights，让面板立刻有数。
+
+        只读 sleep_bouts，不改变它们；重复调用是幂等的（整体重建）。
+        """
+        s = self.s
+        bouts = [b for b in (getattr(s, "sleep_bouts", None) or []) if isinstance(b, dict)]
+        if not bouts:
+            return 0
+        # 先清空，再按时间顺序逐段并入
+        s.sleep_nights = []
+        for bout in sorted(bouts, key=lambda b: float(b.get("end_t", 0.0))):
+            try:
+                self._merge_into_night(bout)
+            except (TypeError, ValueError, KeyError, AttributeError):
+                continue
+        # 周统计也得跟着重算 —— 否则 week_nights 会停留在旧口径的数字
+        # （服务器实测：nights 有 7 个，week_nights 却还是 11），
+        # 面板上两个数自相矛盾。
+        try:
+            self._recompute_sleep_week()
+        except (TypeError, ValueError, AttributeError):
+            pass
+        return len(getattr(s, "sleep_nights", None) or [])
+
+    def _merge_into_night(self, bout: dict) -> dict:
+        """把刚结算的一段 bout 并入它所属的那一夜，返回合并后的 night。
+
+        用户要求（2026-11-26）：「不管中途有没有突然醒过来，只要是一整夜，
+        那就得算在一块。」所以同一 night_key 的第二段 bout 是**追加**，
+        不是新开一夜；时长、分期、评估按小时加权合并，周期数累加。
+        """
+        s = self.s
+        nights = list(getattr(s, "sleep_nights", None) or [])
+        # 2026-11-27 修两个叠加的缺陷（前一条是「两夜并一夜」的根因）：
+        #
+        # ① 夜归属不能用**醒来时刻**。02:45 睡到 12:13 这种晚起，醒来已经越过
+        #    正午分界，于是这一觉会被跟它前面的 23:06-01:11 拆成两夜；
+        #    反过来，10:22 醒和次日 09:51 醒也可能被算进同一个数字 key。
+        #    入睡时刻没有这个歧义 —— 人只会在夜里/凌晨入睡。
+        #
+        # ② 也不能每次重算。_night_key() 依赖 clock_offset，而 clock_offset
+        #    是**可变**的（sync_clock 每次同步重写、重启时按墙钟重新对齐）。
+        #    于是同一段 bout 今天算出来的 key 和明天算出来的可以不同：
+        #    服务器实测 key=17 的夜跨度 d17 00:13 → d18 09:51（33.6h），
+        #    把两夜合成了一夜（hours=16.11、cycles=5）。
+        #    现在结算时算一次、写进 bout["night_key"] 固化，之后只读不算。
+        key = bout.get("night_key")
+        if key is None:
+            key = self._night_key(float(bout.get("start_t", bout.get("end_t", s.t))))
+        key = int(key)
+
+        cur = None
+        if nights and isinstance(nights[-1], dict) and nights[-1].get("key") == key:
+            cur = nights[-1]
+        if cur is None:
+            cur = {
+                "key": key,
+                "start_t": float(bout.get("start_t", s.t)),
+                "end_t": float(bout.get("end_t", s.t)),
+                "hours": 0.0, "bout_h": 0.0,
+                "quality": 0.0, "efficiency": 0.0,
+                "light_h": 0.0, "deep_h": 0.0, "rem_h": 0.0,
+                "wakes": 0, "bouts": 0, "cycles": 0,
+            }
+            nights.append(cur)
+
+        h = float(bout.get("hours", 0.0))
+        prev_h = float(cur.get("hours", 0.0))
+        new_h = prev_h + h
+        # 评分/效率按「小时」加权：睡得长的那一段对整夜评价贡献更大
+        if new_h > 0.0:
+            cur["quality"] = round((float(cur.get("quality", 0.0)) * prev_h
+                                    + float(bout.get("quality", 0.0)) * h) / new_h, 1)
+            cur["efficiency"] = round((float(cur.get("efficiency", 0.0)) * prev_h
+                                       + float(bout.get("efficiency", 0.0)) * h) / new_h, 3)
+        cur["hours"] = round(new_h, 2)
+        cur["bout_h"] = round(float(cur.get("bout_h", 0.0)) + float(bout.get("bout_h", 0.0)), 2)
+        for k in ("light_h", "deep_h", "rem_h"):
+            cur[k] = round(float(cur.get(k, 0.0)) + float(bout.get(k, 0.0)), 2)
+        cur["wakes"] = int(cur.get("wakes", 0)) + int(bout.get("wakes", 0) or 0)
+        cur["bouts"] = int(cur.get("bouts", 0)) + 1
+        # 周期数：一段 bout 里跑过几个 NREM-REM 周期由 stage_index 记录。
+        # bout 结算时 stage_index 已停在最后一周期，故 +1 才是本段跑过的周期数。
+        cur["cycles"] = int(cur.get("cycles", 0)) + int(bout.get("cycles", 0) or 0)
+        cur["start_t"] = min(float(cur.get("start_t", s.t)), float(bout.get("start_t", s.t)))
+        cur["end_t"] = max(float(cur.get("end_t", s.t)), float(bout.get("end_t", s.t)))
+
+        s.sleep_nights = nights
+        return cur
+
+    def _reset_bout_ledger(self):
+        """把「当前 bout 账本」清零。
+
+        2026-11-26 修真实 bug：午睡结算分支（_settle_sleep 的 is_nap 分支）
+        只把 sleep_bout_start_t 归零就 return，四个时长账本（浅睡/深睡/REM/
+        清醒）和分期时钟 sleep_bout_stage_sec 原样留着。而 _sleep_view()
+        的取值顺序是「bout 账本 > 0 就用它」，于是午睡结束后 WebUI 的
+        「睡眠结构」卡一直显示午睡那一个小时，直到下一次真正入睡走到
+        same_bout=False 的分支才被覆盖。
+
+        服务器存档实测（2026-11-26 21:42）：d18 13:31–13:56 午睡已结算
+        （sleep_bout_start_t=0.0），但 sleep_bout_light_sec=1390、
+        sleep_bout_deep_sec=760 仍在。
+
+        这里只清「账本」，不动 sleep_bout_start_t / sleep_bout_end_t ——
+        谁调用谁负责那两处的语义（结算分支要清 start、入睡分支要记 start）。
+        """
+        s = self.s
+        s.sleep_bout_light_sec = 0.0
+        s.sleep_bout_deep_sec = 0.0
+        s.sleep_bout_rem_sec = 0.0
+        s.sleep_bout_awake_sec = 0.0
+        s.sleep_bout_stage_sec = 0.0
+
     def _flush_sleep_bout(self):
         """检查当前 bout 是否已经真正结束，是则结算。
 
@@ -1291,6 +1547,9 @@ class BodyEngine:
                 "reason": f"日间短睡，短于 {min_bout:.1f} 小时门槛",
             }))
             s.sleep_bout_start_t = 0.0
+            # 2026-11-26 修：这里原先直接 return，四个时长账本留在原地，
+            # WebUI 的「睡眠结构」于是把午睡时长的当成当前这一觉的时长显示。
+            self._reset_bout_ledger()
             return
 
         deep_r = deep_s / slept_s
@@ -1336,9 +1595,10 @@ class BodyEngine:
 
         # ---- 写入 bout 历史，供近 7 日统计 ----
         bouts = list(getattr(s, "sleep_bouts", None) or [])
+        bout_start_t = float(s.sleep_bout_start_t or (s.t - bout_s))
         bouts.append({
             "end_t": float(s.t),
-            "start_t": float(s.sleep_bout_start_t or (s.t - bout_s)),
+            "start_t": bout_start_t,
             "hours": round(total_h, 2),
             "bout_h": round(bout_h, 2),
             "quality": round(s.sleep_quality, 1),
@@ -1347,8 +1607,49 @@ class BodyEngine:
             "deep_h": round(deep_s / H2S, 2),
             "rem_h": round(rem_s / H2S, 2),
             "wakes": int(getattr(s, "sleep_bout_wakes", 0) or 0),
+            # 本段 bout 内跑过几个 NREM-REM 周期（2026-11-26 新增，供夜间聚合）。
+            # 周期序号按夜累计，故要减去本段 bout 的起始基线，否则第二段 bout
+            # 会把第一段跑过的周期重复计入（夜间合并时再累加就翻倍）。
+            "cycles": max(1, int(s.stage_index) - int(getattr(s, "sleep_bout_cycle_base", 0)) + 1),
+            # 夜归属：结算时算一次并固化（2026-11-27）。clock_offset 漂移
+            # 或重启重新对齐，都不会追溯改写这段 bout 属于哪一夜。
+            "night_key": self._night_key(bout_start_t),
         })
         s.sleep_bouts = bouts
+        # 2026-11-27：写「最近一次合格 bout」的结构快照。
+        #
+        # 午睡分支在上面已经 return，走不到这里，所以快照永远只反映真正的一夜。
+        # _sleep_view() 在 bout 账本清零后回落到它 —— 此前回落到 dur_*，
+        # 而 dur_* 只在入睡时清零，午睡结束后面板于是把午睡时长当成这一觉的
+        # 结构显示（实测 0.4h / 0.2h 来自 13:38-14:49 的午睡）。
+        try:
+            s.sleep_last_struct = {
+                "light_s": round(light_s, 1),
+                "deep_s": round(deep_s, 1),
+                "rem_s": round(rem_s, 1),
+                "awake_s": round(awake_s, 1),
+                "hours": round(total_h, 2),
+                "quality": round(float(s.sleep_quality), 1),
+                "end_t": float(s.t),
+            }
+        except (TypeError, ValueError, AttributeError):
+            pass
+        # 2026-11-26：并入「这一夜」。同一夜的多段 bout 在这里合账 ——
+        # 用户要的是整夜，不管中途醒过几次。
+        try:
+            self._merge_into_night(s.sleep_bouts[-1])
+        except (TypeError, ValueError, KeyError, AttributeError):
+            pass
+        # v1.4.0：记录入睡时刻（小时），供"规律睡眠"判定算标准差 [R59]。
+        # 取 bout 的 start_t 换成钟点；环形量在 habits 里展开后再算方差。
+        try:
+            onset_t = float(bouts[-1].get("start_t") or 0.0)
+            onset_h = (onset_t / H2S + self.clock_offset) % 24.0
+            onsets = list(getattr(s, "sleep_onsets", None) or [])
+            onsets.append(round(onset_h, 3))
+            s.sleep_onsets = onsets[-14:]
+        except (TypeError, ValueError, IndexError):
+            pass
         self._recompute_sleep_week()
 
         s.sleep_bout_start_t = 0.0
@@ -1361,7 +1662,8 @@ class BodyEngine:
             "deep_h": round(deep_s / H2S, 2),
             "rem_h": round(rem_s / H2S, 2),
             "quality": round(s.sleep_quality, 1),
-            "cycles": s.stage_index + 1,
+            "cycles": max(1, int(s.stage_index)
+                          - int(getattr(s, "sleep_bout_cycle_base", 0)) + 1),
             "counts_as_night": True,
         }))
 
@@ -1380,9 +1682,9 @@ class BodyEngine:
         描述「近期睡眠」的常用滑动窗口，也正是用户要求的「看近一周」。
         文献依据见 docs/血糖与睡眠文献依据.md B 组。
 
-        统计量：
-          nights        —— 窗口内合格 bout 数
-          hours         —— 合格 bout 的睡眠小时合计（TST 之和）
+        统计量（2026-11-26 起以「夜」为单位，不再数 bout 段数）：
+          nights        —— 窗口内合格夜数（同一夜的多段 bout 合并计 1）
+          hours         —— 各夜睡眠小时合计（TST 之和）
           quality       —— 按小时加权的平均质量评分
           efficiency    —— 按小时加权的平均睡眠效率（SE）
         """
@@ -1395,7 +1697,15 @@ class BodyEngine:
         bouts = bouts[-int(self.SLEEP_BOUTS_MAX):]
         s.sleep_bouts = bouts
 
-        if not bouts:
+        # 2026-11-26：「夜」是聚合单位，不再数 bout 段数。
+        # 旧口径 len(bouts) 会把「一夜中断成两段」数成两夜 ——
+        # 服务器实测 7 天报出 11 夜（含 4 段 23:0x 的碎片）。
+        nights = [n for n in (getattr(s, "sleep_nights", None) or [])
+                  if isinstance(n, dict) and (now - float(n.get("end_t", 0.0))) <= window_s]
+        nights = nights[-int(self.SLEEP_BOUTS_MAX):]
+        s.sleep_nights = nights
+
+        if not nights:
             s.sleep_week_hours = 0.0
             s.sleep_week_quality = 0.0
             s.sleep_week_efficiency = 0.0
@@ -1403,22 +1713,22 @@ class BodyEngine:
             s.sleep_week_updated_t = now
             return
 
-        total_h = sum(float(b.get("hours", 0.0)) for b in bouts)
+        total_h = sum(float(n.get("hours", 0.0)) for n in nights)
         if total_h <= 0.0:
             s.sleep_week_hours = 0.0
             s.sleep_week_quality = 0.0
             s.sleep_week_efficiency = 0.0
-            s.sleep_week_nights = len(bouts)
+            s.sleep_week_nights = len(nights)
             s.sleep_week_updated_t = now
             return
 
         # 按小时加权：睡得长的那一夜对总体评价的贡献更大
-        wq = sum(float(b.get("quality", 0.0)) * float(b.get("hours", 0.0)) for b in bouts)
-        we = sum(float(b.get("efficiency", 0.0)) * float(b.get("hours", 0.0)) for b in bouts)
+        wq = sum(float(n.get("quality", 0.0)) * float(n.get("hours", 0.0)) for n in nights)
+        we = sum(float(n.get("efficiency", 0.0)) * float(n.get("hours", 0.0)) for n in nights)
         s.sleep_week_hours = round(total_h, 2)
         s.sleep_week_quality = round(wq / total_h, 1)
         s.sleep_week_efficiency = round(we / total_h, 3)
-        s.sleep_week_nights = len(bouts)
+        s.sleep_week_nights = len(nights)
         s.sleep_week_updated_t = now
 
 
@@ -1484,6 +1794,7 @@ class BodyEngine:
                            or s.t < self._fallback_until)
         meal_times = () if (self._meals_external and not ext_starved) else (7.5, 12.5, 18.5)
         prev_h = self._prev_hour
+        missed = 0.0
         for mt in meal_times:
             # 只在「本步恰好跨过饭点」时触发。跨零点时 prev_h 大于 hour，单独处理。
             if s.hour >= prev_h:
@@ -1504,14 +1815,94 @@ class BodyEngine:
                     # （只重置计时的话，下一顿又要等 16 小时，一天只吃两顿）。
                     self._last_ext_meal_t = s.t
                     self._fallback_until = s.t + 24.0 * H2S
+                missed = 0.0
                 break
+            if crossed:
+                # 跨过饭点时正在睡（或胃还满着）：记下来，醒后补吃。
+                missed = mt
+        # ---- 补吃错过的饭点（v1.4.0）----
+        # 醒来、胃不满、距上次进食超过 3 小时 → 把错过的那顿补上。
+        # 依据：进餐频次本身与代谢风险相关（不吃早餐的人代谢风险更高，
+        # [R55]），而且"一天只吃两顿"在模型里会直接演成糖原耗尽。
+        # 只对内置饭点生效（外部接管三餐时不插手），且补完即清空标记，
+        # 不会变成"一直在吃"。
+        if not meal_times:
+            missed = 0.0
+        if missed:
+            self._missed_meal = missed
+        if (self._missed_meal and meal_times and not s.sleeping
+                and s.gastric_volume < 400.0
+                and (s.t - s.last_meal_t) > 3.0 * H2S):
+            mt = float(self._missed_meal)
+            self._missed_meal = 0.0
+            self._eat(self._meal_slot(mt))
+
         # 加餐：睡眠中不吃。另外加餐与正餐互斥 —— 旧实现里 7:22 的加餐
-        # 和 7:30 的早餐会连着来（hunger 阈值与饭点判定互不知情）。
+        # 和 7:30 的早餐会连着来（ hunger 阈值与饭点判定互不知情）。
         if s.hunger > 80.0 and s.gastric_volume < 300.0 and not s.sleeping:
             if not self._near_meal_time(s.hour, 0.75):
                 self._eat("snack")
 
+        # 自主运动安排（v1.4.0）
+        self._auto_ex_tick(dt)
+
         self._prev_hour = s.hour
+
+    # ------------------------------------------------------------------
+    # 自主运动（v1.4.0）
+    # ------------------------------------------------------------------
+    def _pick_exercise_style(self) -> str:
+        """按仿真日序轮换运动程式：周一/周四力量、周日瑜伽、其余有氧。
+
+        为什么按"日"轮换而不是随机：作息与锻炼习惯本质上是**周期性**的，
+        随机抽会让"每周 3 次力量"变成"有时一周 5 次、有时一次没有"，
+        习惯判定（每周 ≥2 次力量）就会长期抖动。
+        """
+        day = int(self.s.t / 86400.0) % 7
+        if day in (0, 3):
+            return "strength"
+        if day == 6:
+            return "yoga"
+        return "cardio"
+
+    def _auto_ex_tick(self, dt):
+        """引擎自主安排运动（每周 auto_exercise_per_week 次）。
+
+        没有这一条时，"有氧运动/力量训练/健身爱好者/久坐"四项习惯永远
+        判不出来 —— 只有外部 schedule 调 request_exercise 才会动，而
+        大部分部署里没人调。设 0 即回到 v1.3.1 行为。
+        """
+        s = self.s
+        # 7 日滑窗衰减（与 habits 用同一时间尺度）
+        self._auto_ex_week = max(0.0, self._auto_ex_week * (1.0 - dt / (7.0 * 24.0 * H2S)))
+        weekly = float(getattr(self, "auto_exercise_per_week", 0.0) or 0.0)
+        if weekly <= 0.0 or not self.exercise_enabled:
+            return
+        if s.exercising or s.exercise_intent or s.sleeping:
+            return
+        if s.hospital_until > s.t:
+            return
+        if (s.t - self._auto_ex_last_t) < 20.0 * H2S:
+            return
+        if self._auto_ex_week >= weekly:
+            return
+        hour = s.hour
+        if not ((7.0 <= hour < 9.0) or (17.0 <= hour < 19.0)):
+            return
+        # 身体状态不适合就放弃本次，下个窗口再试
+        if s.energy < 25.0 or s.thirst > 80.0 or s.sickness > 0.5 or s.sleep_debt > 12.0:
+            return
+        style = self._pick_exercise_style()
+        if self.exercise_block_reason(style):
+            # 计划中的程式做不了就降级为瑜伽/拉伸 —— 酸痛期"小幅度活动"
+            # 本身就是恢复手段（[R3]），比完全不动更接近真实选择。
+            style = "yoga"
+            if self.exercise_block_reason(style):
+                return
+        minutes = {"strength": 20.0, "yoga": 22.0, "cardio": 30.0}.get(style, 25.0)
+        if self.request_exercise("mid", minutes, style=style):
+            self._auto_ex_last_t = s.t
+            self._auto_ex_week += 1.0
 
     # ------------------------------------------------------------------
     # 排尿
@@ -1749,6 +2140,23 @@ class BodyEngine:
         if not water_already:
             s.chyme_water += tot["water_ml"]
 
+        # ---- v1.4.0：膳食营养结构记账（只累加，不参与生理推进）----
+        # 垃圾食品按"本次实际吃进去的比例"折算：tot 可能已被 portion/ratios
+        # 缩放过，所以用 tot.kcal / 原始 kcal 还原一个比例，而不是直接加 f.kcal。
+        if self.nutrition_enabled:
+            raw_total = 0.0
+            junk_raw = 0.0
+            for k in keys:
+                f = food.FOODS.get(k)
+                if f is None:
+                    continue
+                raw_total += float(f.kcal)
+                if nutprof.is_junk(k, f.group, f.kcal, f.na_mmol,
+                                   f.carb_g, f.protein_g, f.fat_g):
+                    junk_raw += float(f.kcal)
+            scale = (float(tot.get("kcal") or 0.0) / raw_total) if raw_total > 0 else 1.0
+            nutrition.record_intake(s, tot, junk_kcal=junk_raw * scale)
+
     def _eat(self, slot: str):
         """进食：按餐段挑一份食物组合，交给 _eat_keys 走同一条胃排空通路。"""
         if slot == "snack":
@@ -1873,9 +2281,9 @@ class BodyEngine:
             # 慢跑（Zone 2 下限）60% HRmax、快跑 72%。年龄越大 HRmax 越低，
             # 同样的相对强度对应更低的绝对心率 —— 这是固定 +40 做不到的。
             _hr_max = HR_MAX_INTERCEPT - HR_MAX_SLOPE * _age
-            _frac = (HR_EX_FRAC_HIGH
-                     if str(getattr(s, "exercise_intent", "") or "mid") == "high"
-                     else HR_EX_FRAC_MID)
+            _lvl = self._ex_level()
+            _frac = (HR_EX_FRAC_HIGH if _lvl == "high"
+                     else (HR_EX_FRAC_LOW if _lvl == "low" else HR_EX_FRAC_MID))
             hr_t = max(hr_t, _hr_max * _frac)
         # 睡眠时心率随笔迷走张力下降，深睡可降到 50 上下；不用运动那套 +40 的档
         # 睡眠对心率的效应已经全部通过 r_beta1 / r_m2 传进来了（交感下调 ->
@@ -1895,12 +2303,20 @@ class BodyEngine:
         _alpha_hr = min(1.0, 1.0 - math.exp(-dt / _tau_hr))
         s.hr = clamp(s.hr + (hr_t - s.hr) * _alpha_hr, 35.0, 185.0)
 
-        preload = clamp(s.blood_vol / 5000.0, 0.70, 1.15)
+        # 参考血容量改用 blood.BV_REF_ML（v1.4.0）。**这一处漏改过**：
+        # 血容量基线已从 5000 改 4000，除数若仍留 5000，preload 会恒为 0.83，
+        # 每搏量被白砍 17%，实测收缩压从 112 掉到 94、MAP 从 86 掉到 72 ——
+        # 整条血压曲线假性低血压。改回比值口径后逐位恢复。
+        preload = clamp(s.blood_vol / blood.BV_REF_ML, 0.70, 1.15)
         afterload = 1.0 - 0.25 * max(0.0, s.r_alpha1 - 0.5)
         # 运动时静脉回流增加 + 心肌收缩力增强，每搏量**上升**（真实 70→110 mL）。
         # 2026-11-08 修：旧实现没有这一项，心率一涨 SV 就被 (1-0.30*(hr-70)/180)
         # 压下去，CO 只到 9 L/min，脉压反而收窄、舒张压上行 —— 与真实相反。
-        sv_ex = 1.55 if s.exercising else 1.0
+        # 低强度（瑜伽/拉伸）静脉回流增幅远小于跑动，单独给档
+        if s.exercising:
+            sv_ex = 1.55 if self._ex_level() != "low" else 1.15
+        else:
+            sv_ex = 1.0
         s.sv = clamp(80.0 * preload * afterload
                      * (1.0 - 0.30 * (s.hr - 70.0) / 180.0) * sv_ex, 30.0, 150.0)
         s.co = max(1.5, s.hr * s.sv / 1000.0)
@@ -1913,7 +2329,10 @@ class BodyEngine:
         # 净效应是 MAP 略升、PP 扩张（收缩压上去、舒张压不动）。
         # SVR 与 CO 的配比：真实中等强度运动 CO 升到 3-4 倍、SVR 降到 40-50%，
         # 两者相抵使 MAP 大致维持，收缩压因脉压扩张而上行、舒张压持平或略降。
-        vasodil = 0.43 if s.exercising else 1.0
+        if s.exercising:
+            vasodil = 0.43 if self._ex_level() != "low" else 0.78
+        else:
+            vasodil = 1.0
         # 酒精性血管扩张：乙醇/乙醛直接松弛血管平滑肌，SVR 下降 -> 血压略降、
         # 皮肤潮红、散热增加（真人喝一两罐啤酒收缩压降 5-10 mmHg）。
         if s.bac > 0.0:
@@ -1945,11 +2364,21 @@ class BodyEngine:
     # ------------------------------------------------------------------
     def _respiratory(self, dt):
         s = self.s
-        _lvl_hi = str(getattr(s, "exercise_intent", "") or "mid") == "high"
+        _lvl = self._ex_level()
+        _lvl_hi = _lvl == "high"
         rr_t = 14.0 + 6.0 * (s.stress / 100.0) + 0.8 * max(0.0, s.paco2 - 40.0) / 5.0
         if s.exercising:
-            # 强度分级：慢跑 +8、快跑 +14（旧实现一律 +8）。
-            rr_t += EX_RR_HIGH if _lvl_hi else EX_RR_MID
+            # 强度分级：瑜伽 +3、慢跑 +8、快跑 +14。
+            rr_t += EX_RR_HIGH if _lvl_hi else (EX_RR_LOW if _lvl == "low" else EX_RR_MID)
+        # ---- 急性酒精的呼吸抑制（v1.4.0 极端测试补）----
+        # 乙醇抑制延髓呼吸中枢：醉酒者呼吸变慢变浅，重度中毒可致死。
+        # 旧实现里血乙醇只影响 ADH 与体温：实测一次喝下 156 g 纯乙醇（BAC 2.3 g/L）、
+        # 再补 4 个 shot（峰 3.17 g/L）时呼吸仍是 15.6 次/分、健康 100 ——
+        # 相当于"酒精没有任何生理后果"，是明显缺口。
+        # 这里按 BAC > 1.0 g/L 线性压低呼吸，最多 −30%，下限仍是 6 次/分。
+        _bac = clamp(float(getattr(s, "bac", 0.0) or 0.0), 0.0, 6.0)
+        if _bac > 1.0:
+            rr_t *= 1.0 - 0.30 * clamp((_bac - 1.0) / 2.0, 0.0, 1.0)
         s.rr = approach(s.rr, clamp(rr_t, 6.0, 40.0), dt, "rr")
 
         # ---- 肺泡通气量 -> 潮气量（2026-11-16）----
@@ -1973,7 +2402,10 @@ class BodyEngine:
         # 目标值 —— pCO2 不再因 rr 波动漂移；运动相位切换时 VCO2 阶跃、tidal
         # 同步阶跃，VA 瞬时到位，不会出现「VCO2 已降而 VA 未降」的碱中毒过冲。
         stress = max(0.0, float(getattr(s, "stress", 0.0) or 0.0))
-        vco2_t = 0.255 + ((EX_VCO2_HIGH if _lvl_hi else EX_VCO2_MID) if s.exercising else 0.0)
+        # 三档强度（v1.4.0 加低强度瑜伽档）+ 发热阈值 FEVER_C（v1.3.1）
+        _vco2_ex = (EX_VCO2_HIGH if _lvl_hi
+                    else (EX_VCO2_LOW if _lvl == "low" else EX_VCO2_MID))
+        vco2_t = 0.255 + (_vco2_ex if s.exercising else 0.0)
         vco2_t += max(0.0, s.temp - FEVER_C) * 0.06
         if s.exercising:
             pco2_set = 38.5
@@ -1999,7 +2431,8 @@ class BodyEngine:
         s.tidal = clamp(va_t * 1000.0 / max(s.rr, 1.0) + 150.0, 350.0, 2200.0)
 
         vent = s.rr * s.tidal / 1000.0
-        o2_t = clamp(0.90 + 0.10 * (vent / 7.0) - 0.5 * max(0.0, s.blood_vol / 5000.0 - 1.0), 0.60, 0.995)
+        o2_t = clamp(0.90 + 0.10 * (vent / 7.0)
+                     - 0.5 * max(0.0, s.blood_vol / blood.BV_REF_ML - 1.0), 0.60, 0.995)
         # dt 大于 TAU["o2"] 时一阶惯性会过冲（实测 dt=10 得到 107%），必须钳位
         s.sao2 = clamp(approach(s.sao2, o2_t * 100.0, dt, "o2"), 0.0, 100.0)
 
@@ -2012,7 +2445,9 @@ class BodyEngine:
         # 解剖死腔按绝对量算：150 mL/次（潮气量 500 时占 30%）
         va = max((s.tidal - 150.0) * s.rr / 1000.0, 1.0)
         # 静息 VCO2 0.23 L/min（约 2000 kcal/天，RQ 0.85）；运动升到 0.58
-        vco2 = 0.255 + (0.35 if s.exercising else 0.0)
+        vco2 = 0.255 + ((EX_VCO2_HIGH if _lvl_hi
+                         else (EX_VCO2_LOW if _lvl == "low" else 0.35))
+                        if s.exercising else 0.0)
         vco2 += max(0.0, s.temp - FEVER_C) * 0.06
         paco2_t = clamp(863.0 * vco2 / va, 25.0, 70.0)
         s.paco2 = approach_tau(s.paco2, paco2_t, dt, 30.0)
@@ -2304,8 +2739,9 @@ class BodyEngine:
         # 目标是在 15 分钟持续高强度下爬到约 8，所以产率取 28 mmol/L/h
         # （同时清除项一直在起作用，净累积约一半）。
         if s.exercising:
-            level = str(getattr(s, "exercise_intent", "") or "mid")
-            prod = 28.0 if level == "high" else 15.0
+            level = self._ex_level()
+            # 高强度 28 / 中强度 15 / 低强度 5（瑜伽几乎不产乳酸）
+            prod = 28.0 if level == "high" else (5.0 if level == "low" else 15.0)
             # 肌糖原见底时无氧供能占比上升，产乳酸更快
             if s.glycogen < 80.0:
                 prod *= 1.35
@@ -2757,8 +3193,9 @@ class BodyEngine:
             insensible_l_day += (s.temp - FEVER_C) * 0.35
         s.body_water = max(30.0, s.body_water - insensible_l_day * dt / 86400.0)
 
-        # 血容量：由总体水线性映射（TBW 42L <-> 5000 mL 血浆）
-        s.blood_vol = clamp(5000.0 * (s.body_water / 42.0), 3800.0, 5600.0)
+        # 血容量自 v1.4.0 起由 blood.step() 推导（血浆量 + 红细胞量），
+        # 这里不再写一行"总体水线性映射" —— 那个式子把红细胞当成水的一部分，
+        # 失血与贫血都无法表达（见 body/blood.py 模块头）。
 
         # 钠浓度与渗透压：全部由守恒量导出
         s.na = clamp(s.na_mass / s.body_water, 125.0, 160.0)
@@ -2829,6 +3266,7 @@ class BodyEngine:
         if not s.menarche_done:
             s.menarche_done = True
             s.cycle_length = float(self.cycle_length_days)
+            blood.roll_cycle_total(s, self.rng)
             if anchor is None:
                 # 旧行为：新身体从行经结束后起步（day 6），不立刻来月经。
                 # 有现实锚点时不做这个猜测 —— 相位完全由日历决定。
@@ -2949,6 +3387,8 @@ class BodyEngine:
             s.uterus_phase = "menstrual"
             s.menstruating = True
             s.menstrual_flow = 1.0
+            # 每一轮重新抽经血总量（人群分布右偏，见 blood.roll_cycle_total）
+            blood.roll_cycle_total(s, self.rng)
             self.bus.emit(Event(s.t, "menstrual_cycle", "info", "新一轮周期开始", {}))
 
     def _endocrine(self, dt):
@@ -3006,8 +3446,9 @@ class BodyEngine:
         base += 0.25 * clamp(s.prostaglandin, 0.0, 1.0)
         if s.exercising:
             # 强度分级产热（旧实现一律 +0.8）。
-            base += (EX_TEMP_HIGH if str(getattr(s, "exercise_intent", "") or "mid") == "high"
-                     else EX_TEMP_MID)
+            _lvl = self._ex_level()
+            base += (EX_TEMP_HIGH if _lvl == "high"
+                     else (EX_TEMP_LOW if _lvl == "low" else EX_TEMP_MID))
         # 散热负反馈：出汗蒸发带走热量，随 sweat（本身由核心温度驱动）增强。
         # 旧实现里 sweat 只扣体水、完全不参与体温 —— 于是运动+环境热+黄体期
         # 可以一路叠加到 38 ℃ 被判「低烧」，且没有把它拉回来的机制。
@@ -3037,6 +3478,13 @@ class BodyEngine:
             base += 0.12 * clamp(s.caffeine / 200.0, 0.0, 1.0)
         if self.link_activity > 0.0:
             base += 0.15 * min(1.0, self.link_activity)
+        # ---- 发热（v1.4.0）----
+        # 致热驱动由免疫系统算出（IL-6 + 感染负荷），这里只做"抬高调定点"。
+        # 升/降过程中的寒战与出汗不另写逻辑：体温一阶惯性追赶调定点，
+        # 追赶时出现温差，_thermo 末尾的 sweat/shiver 公式自然给出
+        # "升的时候发抖、退的时候出汗"（[R48]）。
+        if s.fever_drive > 0.0:
+            base += clamp(s.fever_drive, 0.0, 2.2)
         s.temp = approach(s.temp, base, dt, "temp")
 
         # 出汗与战栗
@@ -3049,12 +3497,25 @@ class BodyEngine:
         # 寒冷时同理。这一点用 eff_load 叠加，系数控制在不会失控的范围。
         heat_env = eff_load if float(getattr(s, "env_feels_c", 22.0) or 22.0) > 24.0 else 0.0
         cold_env = eff_load if float(getattr(s, "env_feels_c", 22.0) or 22.0) < 18.0 else 0.0
-        s.sweat = clamp((s.temp - 37.5) * 2.0 + 0.55 * heat_env, 0.0, 1.0)
-        # 战栗阈值（2026-11-22，按文献校核）：原为 36.5℃，那是「皮肤温低、觉得冷」
-        # 的体感阈值，不是产热阈值。文献：失温定义为核心 <35.0℃，35.0~36.0 称
-        # "low body temperature"，寒战是 <35℃ 的伴随症状。故取 35.5℃ 作起点
-        # （留 0.5℃ 余量，不把 35.9 的正常偏冷当成寒战）。
-        s.shiver = clamp((35.5 - s.temp) * 3.0 + 0.60 * cold_env, 0.0, 1.0)
+        # ---- 出汗与战栗必须相对**调定点**，而不是相对一个固定 37.5 ----
+        # v1.4.0 加入发热后暴露了旧写法的严重缺陷：发热时核心体温升到
+        # 37.8~38.0，按 (temp-37.5)*2 算出的 sweat 达 0.6，再按 0.8 L/h
+        # 折算就是每小时流失 0.48 L 水 —— 一天 11 L。实测发热 3 天内总体水
+        # 从 41.5 掉到 37.2，触发 _health 的脱水惩罚（每超 1% 扣 12 分/小时），
+        # 健康从 100 崩到 11 并被反复送医。
+        #
+        # 生理事实：发热是**调定点上移**，身体此时在蓄热（血管收缩、寒战），
+        # 并不出汗；出汗发生在退热期（调定点回落、体温被动高于调定点）[R48]。
+        # 因此出汗阈值随致热驱动上移、战栗阈值同样上移：
+        #   蓄热期 temp < 调定点 -> 寒战
+        #   退热期 temp > 调定点 -> 出汗
+        # 阈值取 v1.3.1 的标定（出汗 37.5、寒战 35.5，后者按文献校核过），
+        # 再按 v1.4.0 的致热驱动整体上移 —— 蓄热期不出汗、退热期才出汗。
+        _fever = clamp(float(getattr(s, "fever_drive", 0.0) or 0.0), 0.0, 2.2)
+        _sweat_th = 37.5 + _fever
+        _shiver_th = 35.5 + _fever
+        s.sweat = clamp((s.temp - _sweat_th) * 2.0 + 0.55 * heat_env, 0.0, 1.0)
+        s.shiver = clamp((_shiver_th - s.temp) * 3.0 + 0.60 * cold_env, 0.0, 1.0)
         if s.sweat > 0.1:
             lost = s.sweat * 0.8 * dt / 1000.0          # L
             # 34.0 的硬底相当于体重 42 L 的 81%（失水 19%），真人此时已死亡多时。
@@ -3150,14 +3611,20 @@ class BodyEngine:
                    + 0.08 * clamp(s.gip, 0.0, 1.6)
                    + clamp((s.glucose - 11.0) * 0.012, 0.0, 0.12))
         s.hunger = clamp(drive * (1.0 - min(satiety, 0.88)), 0.0, 100.0)
+        # 生病行为（sickness behavior）里最稳定的一条就是食欲下降 [R49]。
+        # 上限压 45%：感染高峰时"不想吃"，但不至于把自己饿坏。
+        if s.sickness > 0.0:
+            s.hunger *= max(0.0, 1.0 - 0.45 * clamp(s.sickness, 0.0, 1.0))
         # 口渴双通道，缺一不可：
         #   (a) 渗透性口渴 —— 感知血浆渗透压
         #   (b) 容量性口渴 —— 感知血容量/血管紧张素 II。
         # 只有 (a) 时，等渗失水（尿同时带走水与钠）不会触发口渴，
         # 30 天长跑血容量一路漏到下限，血压随之塌陷。
         thirst_osm = clamp((s.osmol - 288.0) * 12.0, 0.0, 100.0)
-        thirst_vol = clamp((5000.0 - s.blood_vol) * 0.14 + max(0.0, s.ang2 - 1.0) * 25.0,
-                           0.0, 100.0)
+        # 参考血容量由 5000 改 4000（v1.4.0），斜率按比例换成 0.175：
+        # 0.14 × 5000 = 0.175 × 4000 = 700，即"缺 1 L 血容量给 70 分口渴"不变。
+        thirst_vol = clamp((blood.BV_REF_ML - s.blood_vol) * 0.175
+                           + max(0.0, s.ang2 - 1.0) * 25.0, 0.0, 100.0)
         thirst_dry = clamp(100.0 * (1.0 - math.exp(-drank_h / 14.0)), 0.0, 100.0)
         s.thirst = clamp(0.55 * thirst_osm + 0.30 * thirst_vol
                          + 0.10 * thirst_dry + 0.05 * s.bladder / 5.0, 0.0, 100.0)
@@ -3165,9 +3632,16 @@ class BodyEngine:
         # 精力
         # 精力 = ATP 储备 + 无饥饿/无口渴。早前含「睡眠债」项，但 APK 元数据里
         # 没有睡眠债这个量（Sleep 仅为症状枚举之一），该项已删除。
-        s.energy = clamp(100.0 * (0.45 * s.atp
-                                  + 0.35 * (1.0 - s.hunger / 100.0)
-                                  + 0.20 * (1.0 - s.thirst / 100.0)), 0.0, 100.0)
+        energy_base = (0.45 * s.atp
+                       + 0.35 * (1.0 - s.hunger / 100.0)
+                       + 0.20 * (1.0 - s.thirst / 100.0))
+        # v1.4.0：两条新通路
+        #   1) 氧输送缺口 —— 贫血/失血/心输出量不足时，组织拿不到氧，
+        #      表现就是"没力气"。上限压 35%。
+        #   2) 生病行为 —— 感染时的乏力、嗜睡 [R49]。上限压 30%。
+        energy_base *= (1.0 - 0.35 * clamp(s.o2_deficit, 0.0, 1.0))
+        energy_base *= (1.0 - 0.30 * clamp(s.sickness, 0.0, 1.0))
+        s.energy = clamp(100.0 * energy_base, 0.0, 100.0)
 
         # ---- 延迟性肌肉酸痛 DOMS（2026-11-14 新增）----
         # 这**不是**乳酸造成的：乳酸几小时就清除，而 DOMS 峰值在运动后 48-72h。
@@ -3242,7 +3716,9 @@ class BodyEngine:
         s.pain = approach_tau(s.pain, perceived, dt, 20.0 * 60.0)
 
         # 压力
+        # 感染带来的躯体不适与发热会推高主观压力（sickness behavior 的一环）
         stress_t = clamp(s.cortisol * 32.0
+                         + clamp(s.sickness, 0.0, 1.0) * 18.0
                          + max(0.0, s.thirst - 50.0) * 0.30
                          + max(0.0, s.hunger - 70.0) * 0.35
                          + max(0.0, s.pain) * 0.5
@@ -3383,6 +3859,26 @@ class BodyEngine:
         # 4) 糖原枯竭 + 持续消耗：血糖尚可但储备见底，属应激状态
         if s.glycogen < 20.0:
             pen += (20.0 - s.glycogen) * 0.12
+        # 5) 贫血（v1.4.0）：Hb 低于 120 起算，每低 10 g/L 加 0.8 分/步。
+        #    依据：贫血的主要后果是氧输送下降与心脏负荷增加 [R41][R65]。
+        if s.hb < 120.0:
+            pen += (120.0 - s.hb) / 10.0 * 0.8
+        # 6) 组织缺氧（氧输送 < 900 mL/min 起算）
+        pen += clamp(s.o2_deficit, 0.0, 1.0) * 4.0
+        # 6.5) 急性酒精中毒（v1.4.0）：BAC 超过 2.0 g/L 起算。
+        # 真人 2.0~3.0 g/L 为重度醉酒（呕吐、意识模糊），3.5 以上可致昏迷与呼吸抑制。
+        # 本模型不设死亡，所以这里只体现"垮掉 + 送医"。
+        _bac = float(getattr(s, "bac", 0.0) or 0.0)
+        if _bac > 2.0:
+            pen += (_bac - 2.0) * 6.0
+        # 7) 感染（v1.4.0）：感染本身消耗身体，但**普通感染不是器官衰竭**。
+        #    系数 2.0 时实测一次峰值 0.9 的上呼吸道感染，38 小时内把健康
+        #    从 100 打到 13、直接触发送医 —— 与"感冒几天、难受但能自理"
+        #    的常识差了一个量级。改为 0.25：峰值 0.9 持续 3 天约扣 16 分，
+        #    与"病一周、虚弱但不住院"对应。高热 (>38.5) 另计。
+        pen += clamp(s.infection, 0.0, 1.0) * 0.25
+        if s.temp > 38.5:
+            pen += (s.temp - 38.5) * 1.0
 
         if pen > 0:
             s.health = clamp(s.health - pen * dt / H2S, 0.0, 100.0)
@@ -3425,7 +3921,12 @@ class BodyEngine:
         if s.health > self.rescue_threshold:
             self._rescue_armed = True
 
-        dying = s.health <= self.rescue_threshold and self._rescue_armed
+        # 危重判据：健康值跌破阈值，**或**血乙醇达到重度中毒量级（v1.4.0）。
+        # 为什么单列酒精：急性酒精中毒的危险是"几小时内呼吸抑制"，而不是
+        # 健康值一点点掉到 25 —— 实测 10 两白酒（BAC 4.04 g/L）时健康还有 97，
+        # 按健康值永远送不了医。3.0 g/L 取"昏迷/需急诊"的常见口径下限。
+        _bac_dying = float(getattr(s, "bac", 0.0) or 0.0) >= 3.0
+        dying = (s.health <= self.rescue_threshold or _bac_dying) and self._rescue_armed
         if not dying:
             s.critical = False
             s.critical_since = 0.0
@@ -3468,7 +3969,16 @@ class BodyEngine:
             (max(0.0, s.map - 160.0) * 0.15, f"高血压危象 MAP {s.map:.0f}"),
             (max(0.0, s.temp - 39.5) * 3.0, f"超高热 {s.temp:.1f} ℃"),
             (max(0.0, 35.0 - s.temp) * 3.0, f"重度失温 {s.temp:.1f} ℃"),
-            (s.pain * 0.05, f"剧痛 {s.pain:.0f}/100"),
+            # 疼痛只在真的够痛时才算送医理由。旧实现无条件计入，于是
+            # 疼痛 22/100（DOMS 级别）也能压过一切、报出"剧痛 22/100" ——
+            # 一句话里数字与措辞自相矛盾（实测熬夜场景 6 次送医全是这个）。
+            ((s.pain * 0.05) if s.pain >= 55.0 else 0.0, f"剧痛 {s.pain:.0f}/100"),
+            # v1.4.0 新增：重度贫血、活动性感染、持续失血
+            (max(0.0, 70.0 - s.hb) * 0.25, f"重度贫血 血红蛋白 {s.hb:.0f} g/L"),
+            (max(0.0, s.infection - 0.6) * 12.0, f"严重感染（{s.infection_site or s.infection_type}）"),
+            (min(8.0, max(0.0, s.blood_loss_24h) / 120.0), f"活动性出血（24 小时 {s.blood_loss_24h:.0f} mL）"),
+            (max(0.0, float(getattr(s, "bac", 0.0) or 0.0) - 2.0) * 4.0,
+             f"急性酒精中毒 血乙醇 {s.bac:.1f} g/L"),
         ]
         cands.sort(reverse=True)
         if cands and cands[0][0] > 0.0:
@@ -3491,8 +4001,9 @@ class BodyEngine:
         s.pain = max(0.0, s.pain * (1.0 - k))
         s.paco2 += (40.0 - s.paco2) * k
 
-        # 补液：血容量与渗透压一起拉回
-        s.blood_vol += (5000.0 - s.blood_vol) * k
+        # 补液：拉回的是**守恒量**（总体水/钠），血容量由 blood.step 重新导出。
+        # 旧实现直接写 blood_vol，而它现在等于血浆+红细胞，直接写会造成
+        # "补液补出了红细胞"的不守恒。
         s.osmol += (295.0 - s.osmol) * k
         s.na += (142.0 - s.na) * k
         s.body_water += (42.0 - s.body_water) * k
@@ -3519,7 +4030,14 @@ class BodyEngine:
             elif not cond:
                 self._last_alert[key] = False
 
-        fire("bp_hi", s.map > 130.0, "warn", f"血压偏高 {s.sbp:.0f}/{s.dbp:.0f}")
+        # 运动中的血压升高是正常生理反应（抗阻训练时收缩压可到 160~180），
+        # 不该报"血压偏高"。v1.4.0 加入力量训练后这条开始误报 —— 30 天里
+        # 6 次告警全部落在运动窗口内，静息血压 108~116 完全正常。
+        # 运动结束后的恢复窗口也不该报警：收缩压从 155 回落到静息要几分钟
+        # （HR 恢复常数 95 s，SV/CO 更慢），这期间 MAP 仍 >130 属正常生理。
+        _ex_recent = (s.t - float(getattr(s, "last_exercise_t", -99999.0) or -99999.0)) < 1800.0
+        fire("bp_hi", (s.map > 130.0) and not s.exercising and not _ex_recent, "warn",
+             f"血压偏高 {s.sbp:.0f}/{s.dbp:.0f}")
         fire("bp_lo", s.map < 60.0, "alert", f"血压偏低 {s.sbp:.0f}/{s.dbp:.0f}")
         fire("hypo", s.glucose < 3.5, "alert", f"低血糖 {s.glucose:.1f} mmol/L")
         fire("hyper", s.glucose > 11.0, "warn", f"高血糖 {s.glucose:.1f} mmol/L")
@@ -3548,6 +4066,16 @@ class BodyEngine:
         days_since = (s.t - s.last_stool_t) / 86400.0
         fire("constipation", days_since > 3.0, "warn", f"便秘 {days_since:.1f} 天未排便")
 
+        # ---- v1.4.0 新增告警：血液 / 免疫 ----
+        fire("fever", s.temp >= 38.5, "warn",
+             f"发热 {s.temp:.1f} ℃" + (f"（{s.infection_site}）" if s.infection_site else ""))
+        fire("infection", s.infection >= 0.45, "notice",
+             "感染中：" + (s.infection_site or s.infection_type or "未定位"))
+        fire("anemia", s.hb < 110.0, "warn",
+             f"血红蛋白 {s.hb:.0f} g/L，{s.anemia} 贫血")
+        fire("bleeding", (s.bleed_rate > 0.0 and s.bleed_done_ml < s.bleed_target_ml), "warn",
+             f"出血中：{s.bleed_site or '外伤'}（已 {s.bleed_done_ml:.0f} mL）")
+
     # ------------------------------------------------------------------
     # 对外接口
     # ------------------------------------------------------------------
@@ -3573,6 +4101,27 @@ class BodyEngine:
             "colon_residue": s.colon_residue,
             "last_meal_items": s.last_meal_items, "last_drink_items": s.last_drink_items,
             "alive": s.alive, "health": s.health,
+            # ---- v1.4.0：血液 ----
+            "plasma_vol": s.plasma_vol, "rbc_mass": s.rbc_mass,
+            "hb": s.hb, "hct": s.hct, "cao2": s.cao2, "do2": s.do2,
+            "o2_deficit": s.o2_deficit, "epo": s.epo,
+            "iron_store": s.iron_store, "fe_absorb_frac": s.fe_absorb_frac,
+            "retic_pct": s.retic_pct, "platelet": s.platelet, "clot": s.clot,
+            "bleed_rate": s.bleed_rate, "bleed_site": s.bleed_site,
+            "menstrual_loss_ml": s.menstrual_loss_ml, "anemia": s.anemia,
+            # ---- v1.4.0：免疫 ----
+            "wbc": s.wbc, "neut": s.neut, "lymph": s.lymph, "mono": s.mono,
+            "il6": s.il6, "crp": s.crp, "infection": s.infection,
+            "infection_site": s.infection_site, "infection_type": s.infection_type,
+            "immunity_days": s.immunity_days, "immune_tone": s.immune_tone,
+            "fever_drive": s.fever_drive, "sickness": s.sickness,
+            # ---- v1.4.0：营养与习惯 ----
+            "diet_score": s.diet_score, "diet_flags": s.diet_flags,
+            "nut_kcal": s.nut_kcal, "nut_fiber_g": s.nut_fiber_g,
+            "nut_fe_mg": s.nut_fe_mg, "nut_ca_mg": s.nut_ca_mg,
+            "nut_na_mg": s.nut_na_mg, "junk_share": s.junk_share,
+            "weight_kg": s.weight_kg, "bmi": s.bmi,
+            "habits_active": s.habits_active, "habits_count": s.habits_count,
             # 濒死与急救
             "critical": s.critical, "critical_since": s.critical_since,
             "hospital_until": s.hospital_until, "hospital_since": s.hospital_since,

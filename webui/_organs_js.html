@@ -5,7 +5,9 @@
   // expanded：哪些分组被展开过（点「展开其余 N 项」）。
   // 记在 STATE 里而不是 DOM 里：15 秒一轮自动刷新会重建 innerHTML，
   // 状态若只存在 DOM 上，用户刚展开的卡片下一轮就自己收回去。
-  var STATE = { organs: null, foods: null, active: '', foodGroup: '', expanded: {} };
+  var STATE = { organs: null, foods: null, active: '', foodGroup: '', expanded: {},
+    // 2026-11-27（1.4.1-dev）：食物库的搜索/排序/分页状态
+    foodQuery: '', foodSort: '', foodDesc: false, foodPage: 0, foodDense: false };
 
   function $(id) { return document.getElementById(id); }
   function txt(id, v) { var el = $(id); if (el) el.textContent = v; }
@@ -231,7 +233,37 @@
     requestAnimationFrame(waveLoop);
   }
 
-  // 2026-11-19：食物库原先一屏 311 行，过于刷屏。改为折叠 + 按分组筛选。
+  // 2026-11-27（1.4.1-dev）：食物库重做。
+  //
+  // 旧版一次把 312 行塞进 DOM、11 列数字平铺，只能按分组筛 —— 想知道「哪个主食蛋白高」
+  // 得自己在几百行里数。现在：搜索（名称 / key / 分组）、分组 chip、点表头排序、
+  // 每页 50 行、简表 / 详表切换。列定义只有一份，表头与单元格都由它生成，不会对不上。
+  var FOOD_COLS = [
+    { k: 'label', t: '名称' },
+    { k: 'group', t: '分组' },
+    { k: 'portion', t: '份量' },
+    { k: 'kcal', t: '热量', num: 1 },
+    { k: 'carb_g', t: '碳水', num: 1 },
+    { k: 'protein_g', t: '蛋白', num: 1 },
+    { k: 'fat_g', t: '脂肪', num: 1 },
+    { k: 'na_mmol', t: '钠', num: 1 },
+    { k: 'fiber_g', t: '纤维', num: 1 },
+    { k: 'k_mg', t: '钾', num: 0 },
+    { k: 'ca_mg', t: '钙', num: 0 },
+    { k: 'fe_mg', t: '铁', num: 1 },
+    { k: 'vc_mg', t: '维C', num: 1 },
+    { k: 'alcohol_g', t: '酒精', num: 1 },
+    { k: 'caffeine_mg', t: '咖啡因', num: 0 }
+  ];
+  var FOOD_SIMPLE = ['label', 'group', 'portion', 'kcal', 'carb_g', 'protein_g'];
+  var FOOD_PAGE_SIZE = 50;
+
+  function foodCols() {
+    return STATE.foodDense ? FOOD_COLS : FOOD_COLS.filter(function (c) {
+      return FOOD_SIMPLE.indexOf(c.k) >= 0;
+    });
+  }
+
   function foodGroups(all) {
     var seen = {}, out = [];
     (all || []).forEach(function (f) {
@@ -240,6 +272,29 @@
       seen[g] += 1;
     });
     return out.map(function (g) { return { name: g, count: seen[g] }; });
+  }
+
+  function foodRows() {
+    var all = (STATE.foods && STATE.foods.foods) || [];
+    var q = (STATE.foodQuery || '').trim().toLowerCase();
+    var out = all.filter(function (f) {
+      if (STATE.foodGroup && (f.group || '其他') !== STATE.foodGroup) return false;
+      if (!q) return true;
+      return String(f.label || '').toLowerCase().indexOf(q) >= 0
+        || String(f.key || '').toLowerCase().indexOf(q) >= 0
+        || String(f.group || '').toLowerCase().indexOf(q) >= 0;
+    });
+    var sk = STATE.foodSort;
+    if (sk) {
+      var col = FOOD_COLS.filter(function (c) { return c.k === sk; })[0] || {};
+      out = out.slice().sort(function (a, b) {
+        var r;
+        if (col.num) { r = (Number(a[sk]) || 0) - (Number(b[sk]) || 0); }
+        else { r = String(a[sk] || '').localeCompare(String(b[sk] || ''), 'zh'); }
+        return STATE.foodDesc ? -r : r;
+      });
+    }
+    return out;
   }
 
   function renderFoodTabs() {
@@ -255,36 +310,102 @@
     box.querySelectorAll('[data-fg]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         STATE.foodGroup = btn.getAttribute('data-fg') || '';
+        STATE.foodPage = 0;
         renderFoodTabs();
         renderFoods();
       });
     });
   }
 
+  function renderFoodHead() {
+    var th = $('food-thead');
+    if (!th) return;
+    var cols = foodCols();
+    th.innerHTML = '<tr>' + cols.map(function (c) {
+      var arrow = STATE.foodSort === c.k ? (STATE.foodDesc ? ' ▼' : ' ▲') : '';
+      return '<th class="sortable' + (c.num ? ' v' : '') + '" data-sk="' + c.k + '">' + c.t + arrow + '</th>';
+    }).join('') + '</tr>';
+    th.querySelectorAll('[data-sk]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var k = el.getAttribute('data-sk');
+        if (STATE.foodSort === k) { STATE.foodDesc = !STATE.foodDesc; }
+        else { STATE.foodSort = k; STATE.foodDesc = false; }
+        STATE.foodPage = 0;
+        renderFoodHead();
+        renderFoods();
+      });
+    });
+  }
+
+  function renderFoodPager(total, pages) {
+    var box = $('food-pager');
+    if (!box) return;
+    if (pages <= 1) { box.innerHTML = ''; return; }
+    var cur = STATE.foodPage;
+    box.innerHTML =
+      '<button type="button" class="lb-chip" data-pg="prev"' + (cur <= 0 ? ' disabled' : '') + '>上一页</button>' +
+      '<span class="lb-pager-text">第 ' + (cur + 1) + ' / ' + pages + ' 页 · 共 ' + total + ' 项</span>' +
+      '<button type="button" class="lb-chip" data-pg="next"' + (cur >= pages - 1 ? ' disabled' : '') + '>下一页</button>';
+    box.querySelectorAll('[data-pg]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var dir = btn.getAttribute('data-pg');
+        STATE.foodPage = Math.max(0, Math.min(pages - 1, cur + (dir === 'next' ? 1 : -1)));
+        renderFoods();
+      });
+    });
+  }
+
+  function wireFoodControls() {
+    var q = $('food-q');
+    if (q && !q.getAttribute('data-wired')) {
+      q.setAttribute('data-wired', '1');
+      q.addEventListener('input', function () {
+        STATE.foodQuery = q.value || '';
+        STATE.foodPage = 0;
+        renderFoods();
+      });
+    }
+    var d = $('food-density');
+    if (d && !d.getAttribute('data-wired')) {
+      d.setAttribute('data-wired', '1');
+      d.addEventListener('click', function () {
+        STATE.foodDense = !STATE.foodDense;
+        d.textContent = STATE.foodDense ? '简表' : '详表';
+        d.classList.toggle('on', STATE.foodDense);
+        STATE.foodPage = 0;
+        renderFoods();
+      });
+    }
+  }
+
   function renderFoods() {
     var d = STATE.foods || {};
     var tb = $('food-table') ? $('food-table').querySelector('tbody') : null;
-    var all = d.foods || [];
-    var foods = STATE.foodGroup
-      ? all.filter(function (f) { return (f.group || '其他') === STATE.foodGroup; })
-      : all;
-    txt('food-count', '共 ' + (d.count || all.length) + ' 项'
-      + (STATE.foodGroup ? '，当前「' + STATE.foodGroup + '」' + foods.length + ' 项' : ''));
+    var rows = foodRows();
+    var cols = foodCols();
+    var pages = Math.max(1, Math.ceil(rows.length / FOOD_PAGE_SIZE));
+    if (STATE.foodPage > pages - 1) STATE.foodPage = pages - 1;
+    var start = STATE.foodPage * FOOD_PAGE_SIZE;
+    var view = rows.slice(start, start + FOOD_PAGE_SIZE);
+
+    txt('food-count', '共 ' + (d.count || rows.length) + ' 项'
+      + (STATE.foodGroup ? '，当前「' + STATE.foodGroup + '」' + rows.length + ' 项' : '')
+      + (STATE.foodQuery ? '，搜索命中 ' + rows.length + ' 项' : ''));
+
+    renderFoodHead();
     if (tb) {
-      tb.innerHTML = foods.map(function (f) {
-        return '<tr><td>' + esc(f.label) + (f.selectable ? '' : ' <span class="lb-badge">不可选</span>') + '</td>' +
-          '<td>' + esc(f.group) + '</td>' +
-          '<td>' + esc(f.portion) + '</td>' +
-          '<td class="v">' + fmt(f.volume_ml) + '</td>' +
-          '<td class="v">' + fmt(f.kcal) + '</td>' +
-          '<td class="v">' + fmt(f.carb_g) + '</td>' +
-          '<td class="v">' + fmt(f.protein_g) + '</td>' +
-          '<td class="v">' + fmt(f.fat_g) + '</td>' +
-          '<td class="v">' + fmt(f.na_mmol) + '</td>' +
-          '<td class="v">' + fmt(f.alcohol_g) + '</td>' +
-          '<td class="v">' + fmt(f.caffeine_mg) + '</td></tr>';
-      }).join('');
+      tb.innerHTML = view.length ? view.map(function (f) {
+        return '<tr>' + cols.map(function (c) {
+          if (c.k === 'label') {
+            return '<td>' + esc(f.label) + (f.selectable ? '' : ' <span class="lb-badge">不可选</span>') + '</td>';
+          }
+          if (c.num) { return '<td class="v">' + fmt(f[c.k]) + '</td>'; }
+          return '<td>' + esc(f[c.k] == null ? '' : f[c.k]) + '</td>';
+        }).join('') + '</tr>';
+      }).join('') : '<tr><td colspan="' + cols.length + '"><span class="lb-empty">没有匹配的食物</span></td></tr>';
     }
+    renderFoodPager(rows.length, pages);
+
     var pools = d.pools || {};
     var names = { breakfast: '早餐池', lunch: '午餐池', dinner: '晚餐池', drink: '饮品池', snack: '加餐池' };
     var box = $('pools');
@@ -295,7 +416,6 @@
       }).join('');
     }
   }
-
   async function loadOrgans() {
     try {
       var res = await window.maibot.query('organs', {});
@@ -317,6 +437,7 @@
       var res = await window.maibot.query('foods', {});
       if (res && res.success === false) { showError(res.error || 'foods 失败'); return; }
       STATE.foods = res || {};
+      wireFoodControls();
       renderFoodTabs();
       renderFoods();
     } catch (e) {
@@ -327,6 +448,7 @@
   function boot() {
     var n = $('btn-now'); if (n) n.addEventListener('click', function () { window.maibot.navigate('now', {}); });
     var t = $('btn-timeline'); if (t) t.addEventListener('click', function () { window.maibot.navigate('timeline', {}); });
+    var vt = $('btn-vitals'); if (vt) vt.addEventListener('click', function () { window.maibot.navigate('vitals', {}); });
 
     // ---- 串行加载 ----
     // 宿主前端硬限制：所有 maibot.query / action / navigate 加起来，

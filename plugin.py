@@ -40,6 +40,7 @@ from .body.food import (
     MEAL_POOLS,
     SNACK_POOL,
     combo_summary,
+    combo_compact,
     decompose_menu,
     is_plain_food,
     parse_menu,
@@ -47,10 +48,16 @@ from .body.food import (
 from .body.translate import (NORMAL_BAND, FEELING_LEVELS, drunk_level, eat_phase, phase,
                                recent_meal_text)
 from .body.nlp import analyze as _nlp_analyze
+# v1.4.0 新子系统：只读展示 + 习惯判定。四个模块与 engine 同构（纯函数推进
+# state），插件侧只需要调用它们的 judge/registry_audit，不重复实现业务逻辑。
+from .body import blood as _blood
+from .body import immune as _immune
+from .body import nutrition as _nutrition
+from .body import habits as _habits
 from .config import LifeBodyConfig
 from .link import LifeLink
 
-PLUGIN_VERSION = "1.3.2"
+PLUGIN_VERSION = "1.4.0"
 H2S = 3600.0
 SAVE_FILE = "body_state.json"
 
@@ -491,6 +498,8 @@ class LifeBodyPlugin(MaiBotPlugin):
         # None，往 self._link 上恢复键值会静默失败，于是每次重启当天已经吃过
         # 的饭窗都会被重新触发一遍（2026-11-09 复现：08:00/08:31/09:02 连吃三份）。
         self._link_meal_key: str = ""
+        # v1.4.0：是否把生活习惯写进提示词（配置 habits.inject_prompt）
+        self._habits_inject = True
 
     @staticmethod
     def _history_limit(value: Any) -> int:
@@ -707,6 +716,44 @@ class LifeBodyPlugin(MaiBotPlugin):
                 1.0, float(getattr(sleep_cfg, "force_sleep_hours", 6.0)))
             self._engine.force_sleep_wakeable = bool(
                 getattr(sleep_cfg, "force_sleep_wakeable", True))
+        # ---- v1.4.0 四套新系统配置注入 ----
+        b_cfg = getattr(self.config, "blood", None)
+        if b_cfg is not None:
+            self._engine.blood_enabled = bool(getattr(b_cfg, "enabled", True))
+            self._engine.bleed_accident_per_day = max(
+                0.0, float(getattr(b_cfg, "accident_per_day", 0.03)))
+            self._engine.bleed_accident_max_ml = max(
+                0.0, float(getattr(b_cfg, "accident_max_ml", 350.0)))
+            self._engine.menstrual_gain = max(
+                0.0, float(getattr(b_cfg, "menstrual_gain", 1.0)))
+        i_cfg = getattr(self.config, "immune", None)
+        if i_cfg is not None:
+            self._engine.immune_enabled = bool(getattr(i_cfg, "enabled", True))
+            self._engine.infection_per_day = max(
+                0.0, float(getattr(i_cfg, "infection_per_day", 0.012)))
+            self._engine.fever_gain = max(0.0, float(getattr(i_cfg, "fever_gain", 1.0)))
+            self._engine.immune_sensitivity = max(
+                0.0, float(getattr(i_cfg, "immune_sensitivity", 1.0)))
+        n_cfg = getattr(self.config, "nutrition", None)
+        if n_cfg is not None:
+            self._engine.nutrition_enabled = bool(getattr(n_cfg, "enabled", True))
+            self._engine.height_cm = max(120.0, min(220.0, float(getattr(n_cfg, "height_cm", 162.0))))
+            self._engine.reference_weight_kg = max(
+                30.0, min(120.0, float(getattr(n_cfg, "reference_weight_kg", 55.0))))
+        h_cfg = getattr(self.config, "habits", None)
+        if h_cfg is not None:
+            self._engine.habits_enabled = bool(getattr(h_cfg, "enabled", True))
+            self._engine.relax_stress_max = max(
+                0.0, min(90.0, float(getattr(h_cfg, "relax_stress_max", 35.0))))
+            self._engine.aerobic_week_min = max(
+                0.0, float(getattr(h_cfg, "aerobic_week_min", 150.0)))
+            self._engine.strength_week_sessions = max(
+                0.0, float(getattr(h_cfg, "strength_week_sessions", 2)))
+            self._habits_inject = bool(getattr(h_cfg, "inject_prompt", True))
+        if ex_cfg is not None:
+            self._engine.auto_exercise_per_week = max(
+                0.0, float(getattr(ex_cfg, "auto_per_week", 4.0)))
+
         if not want:
             # 关掉联动时立刻回到中性（-1 = 无外部意见），避免残留值继续压低心率。
             # 注意这里不能写 0.0：0.0 是"外部明确说清醒"，只在联动开着时才有意义。
@@ -751,6 +798,39 @@ class LifeBodyPlugin(MaiBotPlugin):
             "enable_stool": bool(getattr(exc, "show_stool", True)) if exc else True,
         }
 
+
+    def _last_night_view(self, nights: Any) -> dict[str, Any]:
+        """把最近一夜的聚合结果整理成前端可直接用的形状。
+
+        2026-11-26 新增。空的/异常的 nights 一律返回 {}，让前端各字段按
+        "—" 显示，不在前端做 None 判断。
+        """
+        if not isinstance(nights, (list, tuple)) or not nights:
+            return {}
+        night = nights[-1]
+        if not isinstance(night, dict):
+            return {}
+        try:
+            return {
+                # 起止时刻（仿真秒）：前端用它把夜间分期图裁到这一夜的区间，
+                # 否则一天里的午睡会被当成"最近一段睡眠"画进图里。
+                "start_t": round(float(night.get("start_t", 0.0) or 0.0), 1),
+                "end_t": round(float(night.get("end_t", 0.0) or 0.0), 1),
+                "hours": round(float(night.get("hours", 0.0) or 0.0), 2),
+                "bout_h": round(float(night.get("bout_h", 0.0) or 0.0), 2),
+                "quality": round(float(night.get("quality", 0.0) or 0.0), 0),
+                "efficiency": round(float(night.get("efficiency", 0.0) or 0.0), 3),
+                "light_h": round(float(night.get("light_h", 0.0) or 0.0), 2),
+                "deep_h": round(float(night.get("deep_h", 0.0) or 0.0), 2),
+                "rem_h": round(float(night.get("rem_h", 0.0) or 0.0), 2),
+                "wakes": int(night.get("wakes", 0) or 0),
+                "bouts": int(night.get("bouts", 0) or 0),
+                "cycles": int(night.get("cycles", 0) or 0),
+            }
+        except (TypeError, ValueError):
+            return {}
+
+
     def _sleep_view(self) -> dict[str, Any]:
         """睡眠面板：四态分期、整夜结构、质量评分、睡眠债、近 7 日汇总。
 
@@ -774,8 +854,28 @@ class LifeBodyPlugin(MaiBotPlugin):
             total = bout_total
             light_s, deep_s, rem_s = bout_light, bout_deep, bout_rem
         else:
-            total = s.dur_light + s.dur_deep + s.dur_rem
-            light_s, deep_s, rem_s = s.dur_light, s.dur_deep, s.dur_rem
+            # 2026-11-27：账本为 0 时回落到「最近一次合格 bout」的快照。
+            #
+            # 此前回落到 dur_light/dur_deep/dur_rem，而这三个累计量只在
+            # 「新一段 bout 入睡」时清零，午睡分支从不碰它 —— 于是午睡结束
+            # 后面板把午睡时长当成这一觉的结构显示。服务器实测：dur_light=1560s、
+            # dur_deep=690s，面板显示 0.4h / 0.2h，正是 13:38-14:49 那场午睡。
+            # 快照只在合格 bout 结算时写入，午睡永远进不来。
+            snap = getattr(s, "sleep_last_struct", None)
+            snap_total = 0.0
+            if isinstance(snap, dict):
+                snap_total = (float(snap.get("light_s", 0.0) or 0.0)
+                              + float(snap.get("deep_s", 0.0) or 0.0)
+                              + float(snap.get("rem_s", 0.0) or 0.0))
+            if snap_total > 0.0:
+                light_s = float(snap.get("light_s", 0.0) or 0.0)
+                deep_s = float(snap.get("deep_s", 0.0) or 0.0)
+                rem_s = float(snap.get("rem_s", 0.0) or 0.0)
+                total = snap_total
+            else:
+                # 连快照都没有（全新身体 / 极老存档）才退回 dur_*。
+                total = s.dur_light + s.dur_deep + s.dur_rem
+                light_s, deep_s, rem_s = s.dur_light, s.dur_deep, s.dur_rem
         hours = total / H2S
 
         def pct(x: float) -> float:
@@ -808,6 +908,9 @@ class LifeBodyPlugin(MaiBotPlugin):
             # ---- 近 7 日汇总（7 日滑动聚合，不是 PSQI：PSQI 官方窗口是 1 个月）----
             "week_nights": int(getattr(s, "sleep_week_nights", 0) or 0),
             "week_hours": _r(getattr(s, "sleep_week_hours", 0.0), 2),
+            # 2026-11-26：「最近一夜」的聚合视图 —— 同一夜的多段 bout 已合账，
+            # 用户要看的是「这一整夜」，不是被中途醒来切开的碎片。
+            "last_night": self._last_night_view(getattr(s, "sleep_nights", None)),
             "week_quality": _r(getattr(s, "sleep_week_quality", 0.0), 0),
             "week_efficiency": _r(getattr(s, "sleep_week_efficiency", 0.0), 3),
             "week_skipped": int(getattr(s, "sleep_week_skipped", 0) or 0),
@@ -1541,6 +1644,53 @@ class LifeBodyPlugin(MaiBotPlugin):
                 seed_state = BodyState(**restored)
                 assert self._engine is not None
                 self._engine.s = seed_state
+                # 2026-11-26：旧存档只有 sleep_bouts、没有 sleep_nights。
+                # 不重建的话，WebUI 的「最近一夜」会一直显示「—」，
+                # 直到下一夜结算（最长要等十几个小时）。这里按 night_key
+                # 把已有 bouts 分组回填，面板立刻有数；幂等，可重复调用。
+                if not getattr(seed_state, "sleep_nights", None) and getattr(seed_state, "sleep_bouts", None):
+                    try:
+                        n = self._engine.rebuild_nights_from_bouts()
+                        self._get_logger().info(
+                            "睡眠夜间聚合已从 %d 段 bout 回填为 %d 夜",
+                            len(seed_state.sleep_bouts), n)
+                    except Exception as exc:  # noqa: BLE001 - 回填失败不该影响启动
+                        self._get_logger().debug("夜间回填跳过：%s", exc)
+                # 2026-11-27：结构快照回填。旧存档没有 sleep_last_struct，
+                # 而 dur_* 此刻可能正残留着午睡的时长（就是这个 bug 的现场）。
+                # 用最近一段合格 bout 回填，面板重载后立刻显示真实结构，
+                # 不必等到当晚下一次结算。
+                if (not getattr(seed_state, "sleep_last_struct", None)
+                        and getattr(seed_state, "sleep_bouts", None)):
+                    try:
+                        last = seed_state.sleep_bouts[-1]
+                        if isinstance(last, dict):
+                            seed_state.sleep_last_struct = {
+                                "light_s": round(float(last.get("light_h", 0.0) or 0.0) * H2S, 1),
+                                "deep_s": round(float(last.get("deep_h", 0.0) or 0.0) * H2S, 1),
+                                "rem_s": round(float(last.get("rem_h", 0.0) or 0.0) * H2S, 1),
+                                "awake_s": 0.0,
+                                "hours": round(float(last.get("hours", 0.0) or 0.0), 2),
+                                "quality": round(float(last.get("quality", 0.0) or 0.0), 1),
+                                "end_t": float(last.get("end_t", 0.0) or 0.0),
+                            }
+                    except Exception as exc:  # noqa: BLE001 - 回填失败不该影响启动
+                        self._get_logger().debug("结构快照回填跳过：%s", exc)
+                # 2026-11-27：夜归属规则升级到 v2（按入睡时刻 + 结算时固化 key）。
+                # 旧规则用「醒来时刻 + 当时的 clock_offset」现算，而 clock_offset
+                # 可变（sync_clock 每次同步重写、重启按墙钟重对齐），于是同一段
+                # bout 的归属会随时间改变 —— 服务器实测 key=17 的夜跨度 33.6h，
+                # 把 d17 夜和 d18 夜并成了一夜（hours=16.11、cycles=5）。
+                # 这里按 bouts 整体重建一次；重建幂等，做完标记为 2。
+                if int(getattr(seed_state, "sleep_night_rule", 1) or 1) < 2:
+                    try:
+                        n = self._engine.rebuild_nights_from_bouts()
+                        seed_state.sleep_night_rule = 2
+                        self._get_logger().info(
+                            "睡眠夜归属已按 v2 规则重建：%d 段 bout -> %d 夜",
+                            len(getattr(seed_state, "sleep_bouts", None) or []), n)
+                    except Exception as exc:  # noqa: BLE001 - 重建失败不该影响启动
+                        self._get_logger().debug("夜归属重建跳过：%s", exc)
 
             saved_wall = payload.get("saved_wall")
             self._offline_wall = float(saved_wall or 0.0)
@@ -1872,21 +2022,38 @@ class LifeBodyPlugin(MaiBotPlugin):
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
 
-    @API(name="webui_foods", description="食物库：311 种食物的份量与成分（23 项 FoodType + 288 项扩展），以及三餐候选池", version="1", public=False)
+    @API(name="webui_foods", description="食物库：312 种可吃食物的份量与成分（23 项 FoodType + 288 项扩展 + 1 项画像），以及三餐候选池", version="1", public=False)
     async def webui_foods(self, **kwargs: Any) -> dict[str, Any]:
-        """返回只读食物表。"""
+        """返回只读食物表。
+
+        2026-11-27（v1.4.0）：三处改动，都是展示层，引擎侧的 Food.group 不动
+        （营养画像按 group 查表，改数据会影响估算）。
+
+        1. 补上 v1.4.0 新增的 5 个营养素字段 —— 数据早就算好了，接口一直没往外给。
+        2. 分组口径归一：肉蛋鱼 → 肉蛋、碳水 → 主食。这两组是早期 23 项基础食物的
+           老组名，与后加的 288 项并存，页面上会出现两个语义重复的 tab。
+        3. 食糜（Chyle）不进列表。它是消化中间物、不可选，只用来算胃排空，
+           却在食物库里占了一个只有 1 项的 tab。
+        """
 
         del kwargs
+        group_alias = {"肉蛋鱼": "肉蛋", "碳水": "主食"}
         try:
             foods = []
             for item in ALL_FOODS.values() if isinstance(ALL_FOODS, dict) else ALL_FOODS:
+                group = group_alias.get(item.group, item.group)
+                if group == "消化中间物":
+                    continue
                 foods.append({
-                    "key": item.key, "label": item.label, "group": item.group,
+                    "key": item.key, "label": item.label, "group": group,
                     "portion": item.portion, "volume_ml": _r(item.volume_ml, 0),
                     "kcal": _r(item.kcal, 0), "carb_g": _r(item.carb_g, 1),
                     "protein_g": _r(item.protein_g, 1), "fat_g": _r(item.fat_g, 1),
                     "na_mmol": _r(item.na_mmol, 1), "alcohol_g": _r(item.alcohol_g, 1),
                     "caffeine_mg": _r(item.caffeine_mg, 0),
+                    "fiber_g": _r(item.fiber_g, 1), "k_mg": _r(item.k_mg, 0),
+                    "ca_mg": _r(item.ca_mg, 0), "fe_mg": _r(item.fe_mg, 1),
+                    "vc_mg": _r(item.vc_mg, 1),
                     "selectable": bool(item.selectable),
                 })
             def _pool_labels(pool: Any) -> list[str]:
@@ -1895,18 +2062,210 @@ class LifeBodyPlugin(MaiBotPlugin):
                 out: list[str] = []
                 for entry in pool or []:
                     keys = [entry] if isinstance(entry, str) else list(entry)
-                    text = combo_summary(keys)
+                    # 2026-11-27（v1.4.0）：面板上用「米饭+黄焖鸡+紫菜汤」这种紧凑写法。
+                    # 一屏要塞五个池子，"+ + +" 的空格纯属浪费横向空间。
+                    text = combo_compact(keys)
                     if not text:
                         text = "、".join(FOODS[k].label for k in keys if k in FOODS)
                     out.append(text or str(entry))
                 return out
 
-            pools = {slot: _pool_labels(pool) for slot, pool in MEAL_POOLS.items()}
-            pools["drink"] = _pool_labels(DRINK_POOL)
-            pools["snack"] = _pool_labels(SNACK_POOL)
+            def _dedup(items: list[str]) -> list[str]:
+                """饮品池靠重复来加权重（水×3、小口水×2），面板上别显示成「水、水、水」。"""
+                seen: set[str] = set()
+                out2: list[str] = []
+                for it in items:
+                    if it not in seen:
+                        seen.add(it)
+                        out2.append(it)
+                return out2
+
+            pools = {slot: _dedup(_pool_labels(pool)) for slot, pool in MEAL_POOLS.items()}
+            pools["drink"] = _dedup(_pool_labels(DRINK_POOL))
+            pools["snack"] = _dedup(_pool_labels(SNACK_POOL))
             return {"foods": foods, "pools": pools, "count": len(foods)}
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+
+    # ===== v1.4.0：血液 / 免疫 / 营养 / 习惯 的只读接口 =====
+
+    @staticmethod
+    def _panel_row(field: str, label: str, unit: str, digits: int, value: float,
+                   lo: float = None, hi: float = None, ref: str = "") -> dict[str, Any]:
+        """拼一行指标。lo/hi 只用来决定配色（warn/good），不做任何计算。"""
+        tone = "good"
+        if lo is not None and value < lo:
+            tone = "warn"
+        if hi is not None and value > hi:
+            tone = "warn"
+        return {"field": field, "label": label, "unit": unit, "value": value,
+                "ref": ref, "tone": tone}
+
+    @API(name="webui_blood", description="血液与免疫：血容量分账、血红蛋白与红细胞压积、铁与血小板、白细胞三分类与炎症指标", version="1", public=False)
+    async def webui_blood(self, **kwargs: Any) -> dict[str, Any]:
+        """返回血液与免疫两组面板（只读）。"""
+
+        del kwargs
+        if not self._ready or self._engine is None:
+            return {"ok": False, "error": "身体尚未就绪"}
+        try:
+            s = self._s
+            def g(name: str, digits: int = 1) -> float:
+                return _r(getattr(s, name, 0.0), digits)
+
+            row = self._panel_row
+            groups = [
+                {"id": "volume", "title": "血容量", "subtitle": "血浆量与红细胞量分开记账",
+                 "rows": [
+                     row("blood_vol", "循环血量", "mL", 0, g("blood_vol"), ref="约 4000"),
+                     row("plasma_vol", "血浆量", "mL", 0, g("plasma_vol"), ref="约 2400"),
+                     row("rbc_mass", "红细胞量", "mL", 0, g("rbc_mass"), ref="约 1600"),
+                     row("hct", "红细胞压积", "%", 1, g("hct"), 36.0, 46.0, "36~46"),
+                     row("hb", "血红蛋白", "g/L", 1, g("hb"), 120.0, 150.0, "120~150"),
+                 ]},
+                {"id": "oxygen", "title": "携氧", "subtitle": "血红蛋白决定血氧含量",
+                 "rows": [
+                     row("cao2", "动脉血氧含量", "mL/dL", 1, g("cao2"), 16.0, 20.5, "17~20"),
+                     row("do2", "氧输送", "mL/min", 0, g("do2"), 700.0, 1400.0, "700~1400"),
+                     row("o2_deficit", "氧输送缺口", "0-1", 2, g("o2_deficit"), None, 0.05, "0 为正常"),
+                 ]},
+                {"id": "marrow", "title": "造血与铁", "subtitle": "促红素驱动、铁储备与吸收",
+                 "rows": [
+                     row("epo", "促红素驱动", "相对", 2, g("epo"), None, None, "1.0 为基线"),
+                     row("retic_pct", "网织红细胞", "%", 1, g("retic_pct"), 0.5, 2.5, "0.5~2.5"),
+                     row("iron_store", "储存铁", "mg", 0, g("iron_store"), 200.0, 1000.0, "200~1000"),
+                     row("fe_intake_24h", "膳食铁", "mg/天", 1, g("fe_intake_24h"), 12.0, None, "≥18"),
+                     row("fe_absorb_frac", "铁吸收分数", "0-1", 3, g("fe_absorb_frac"), 0.05, 0.40, "5%~40%"),
+                 ]},
+                {"id": "clot", "title": "止血", "subtitle": "血小板与凝血",
+                 "rows": [
+                     row("platelet", "血小板", "10^9/L", 0, g("platelet"), 150.0, 350.0, "150~350"),
+                     row("clot", "凝血进程", "0-1", 2, g("clot"), None, 0.5, "0 为无出血"),
+                     row("bleed_rate", "出血速率", "mL/min", 2, g("bleed_rate"), None, 0.0, "0 为无出血"),
+                     row("menstrual_loss_ml", "本次经血", "mL", 0, g("menstrual_loss_ml"), None, None, "10~80"),
+                 ]},
+                {"id": "wbc", "title": "白细胞", "subtitle": "三类分开计数（细菌升中性粒、病毒升淋巴）",
+                 "rows": [
+                     row("wbc", "白细胞总数", "10^9/L", 2, g("wbc"), 4.0, 10.0, "4~10"),
+                     row("neut", "中性粒细胞", "10^9/L", 2, g("neut"), 2.0, 7.5, "2.0~7.5"),
+                     row("lymph", "淋巴细胞", "10^9/L", 2, g("lymph"), 1.0, 4.0, "1.0~4.0"),
+                     row("mono", "单核细胞", "10^9/L", 2, g("mono"), 0.2, 0.8, "0.2~0.8"),
+                 ]},
+                {"id": "inflam", "title": "炎症与免疫张力", "subtitle": "IL-6 → CRP 两级延迟",
+                 "rows": [
+                     row("il6", "白细胞介素-6", "pg/mL", 1, g("il6"), None, 7.0, "<7"),
+                     row("crp", "C 反应蛋白", "mg/L", 1, g("crp"), None, 10.0, "<10"),
+                     row("infection", "感染负荷", "0-1", 2, g("infection"), None, 0.1, "0 为健康"),
+                     row("immune_tone", "免疫张力", "0-1", 2, g("immune_tone"), 0.8, 1.35, "1.0 为基线"),
+                     row("immunity_days", "感染后抵抗期", "天", 1, g("immunity_days"), None, None, ""),
+                 ]},
+            ]
+            notes = []
+            if str(getattr(s, "infection_type", "") or ""):
+                notes.append("当前感染：%s / %s" % (
+                    str(getattr(s, "infection_type", "")),
+                    str(getattr(s, "infection_site", "") or "未定位")))
+            if str(getattr(s, "bleed_site", "") or "") and float(getattr(s, "bleed_rate", 0.0) or 0.0) > 0.0:
+                notes.append("出血中：%s（已 %.0f mL）" % (
+                    str(getattr(s, "bleed_site", "")),
+                    float(getattr(s, "bleed_done_ml", 0.0) or 0.0)))
+            if str(getattr(s, "anemia", "none") or "none") != "none":
+                notes.append("贫血分级：%s" % str(getattr(s, "anemia", "")))
+            return {
+                "ok": True,
+                "clock": {"time": _clock(s.hour), "day": self._body_sim_day(),
+                          "phase": phase(s.hour)},
+                "groups": groups,
+                "notes": notes,
+                "temp": _r(getattr(s, "temp", 36.8), 2),
+                "fever_drive": _r(getattr(s, "fever_drive", 0.0), 2),
+                "sickness": _r(getattr(s, "sickness", 0.0), 2),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+
+    @API(name="webui_nutrition", description="膳食营养结构与生活习惯：供能比、纤维与四种微量营养素、膳食质量分，以及 16 项生活习惯的判定结果", version="1", public=False)
+    async def webui_nutrition(self, **kwargs: Any) -> dict[str, Any]:
+        """返回营养面板与习惯判定（只读）。"""
+
+        del kwargs
+        if not self._ready or self._engine is None:
+            return {"ok": False, "error": "身体尚未就绪"}
+        try:
+            s = self._s
+            def g(name: str, digits: int = 1) -> float:
+                return _r(getattr(s, name, 0.0), digits)
+
+            row = self._panel_row
+            rec = _nutrition.RECOMMEND
+            groups = [
+                {"id": "today", "title": "今日摄入", "subtitle": "跨零点清零",
+                 "rows": [
+                     row("nut_kcal", "能量", "kcal", 0, g("nut_kcal", 0),
+                         None, None, "按需求量"),
+                     row("nut_protein_g", "蛋白质", "g", 1, g("nut_protein_g"), None, None, "约 55"),
+                     row("nut_fat_g", "脂肪", "g", 1, g("nut_fat_g"), None, None, ""),
+                     row("nut_carb_g", "碳水", "g", 1, g("nut_carb_g"), None, None, ""),
+                     row("nut_fiber_g", "膳食纤维", "g", 1, g("nut_fiber_g"),
+                         rec["fiber_g"], None, "≥25"),
+                     row("nut_na_mg", "钠", "mg", 0, g("nut_na_mg"), None,
+                         rec["na_mg"], "<2000"),
+                 ]},
+                {"id": "micro", "title": "矿物质与维生素", "subtitle": "四项关键（类别画像估算）",
+                 "rows": [
+                     row("nut_k_mg", "钾", "mg", 0, g("nut_k_mg"), rec["k_mg"], None, "≥2000"),
+                     row("nut_ca_mg", "钙", "mg", 0, g("nut_ca_mg"), rec["ca_mg"], None, "≥800"),
+                     row("nut_fe_mg", "铁", "mg", 1, g("nut_fe_mg"), rec["fe_mg"], None, "≥18"),
+                     row("nut_vc_mg", "维生素 C", "mg", 0, g("nut_vc_mg"), rec["vc_mg"], None, "≥100"),
+                 ]},
+                {"id": "structure", "title": "膳食结构", "subtitle": "供能比与质量分",
+                 "rows": [
+                     row("diet_score", "膳食质量分", "0-100", 1, g("diet_score"), 70.0, None, "≥70 为良好"),
+                     row("protein_share", "蛋白供能比", "%", 1, _r(g("protein_share") * 100.0, 1),
+                         10.0, 20.0, "10~20%"),
+                     row("fat_share", "脂肪供能比", "%", 1, _r(g("fat_share") * 100.0, 1),
+                         20.0, 30.0, "20~30%"),
+                     row("carb_share", "碳水供能比", "%", 1, _r(g("carb_share") * 100.0, 1),
+                         50.0, 65.0, "50~65%"),
+                     row("junk_share", "垃圾食品占比", "%", 1, _r(g("junk_share") * 100.0, 1),
+                         None, 30.0, "<30%"),
+                 ]},
+                {"id": "body", "title": "体重与能量平衡", "subtitle": "由累计能量盈亏派生（不参与生理计算）",
+                 "rows": [
+                     row("weight_kg", "体重", "kg", 1, g("weight_kg"), None, None, "参考值 55"),
+                     row("bmi", "BMI", "", 1, g("bmi"), 18.5, 23.9, "18.5~23.9"),
+                     row("energy_need_kcal", "估算需求", "kcal", 0, g("energy_need_kcal", 0), None, None, ""),
+                     row("energy_balance_kcal", "累计能量盈亏", "kcal", 0,
+                         g("energy_balance_kcal", 0), None, None, "0 为持平"),
+                 ]},
+            ]
+            active = {h["id"]: h for h in _habits.judge(
+                s, relax_stress_max=getattr(self._engine, "relax_stress_max", 35.0),
+                aerobic_week_min=getattr(self._engine, "aerobic_week_min", 150.0),
+                strength_week_sessions=getattr(self._engine, "strength_week_sessions", 2.0))}
+            habits = []
+            for hid, label, polarity, desc, proxy in _habits.HABITS:
+                hit = active.get(hid)
+                habits.append({
+                    "id": hid, "label": label, "polarity": polarity,
+                    "desc": desc, "proxy": proxy,
+                    "active": hit is not None,
+                    "strength": round(float(hit.get("strength", 0.0)), 3) if hit else 0.0,
+                    "evidence": (hit or {}).get("evidence", ""),
+                })
+            return {
+                "ok": True,
+                "clock": {"time": _clock(s.hour), "day": self._body_sim_day(),
+                          "phase": phase(s.hour)},
+                "groups": groups,
+                "score": _r(getattr(s, "diet_score", 0.0), 1),
+                "flags": [x for x in str(getattr(s, "diet_flags", "") or "").split(",") if x],
+                "habits": habits,
+                "habits_active": [h["id"] for h in habits if h["active"]],
+                "recommend": {k: v for k, v in _nutrition.RECOMMEND.items()},
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
 
     @API(name="webui_intervene", description="对麦麦的身体做一次干预：喝水、进食、开始或停止运动", version="1", public=False)
     async def webui_intervene(self, kind: str = "drink", **kwargs: Any) -> dict[str, Any]:
@@ -2103,6 +2462,25 @@ class LifeBodyPlugin(MaiBotPlugin):
             "euphoria": round(float(getattr(s, "euphoria", 0.0) or 0.0), 2),
             "dysphoria": round(float(getattr(s, "dysphoria", 0.0) or 0.0), 2),
             "mood_valence": round(float(getattr(s, "mood_valence", 0.0) or 0.0), 2),
+            # ---- v1.4.0：血液 / 免疫 / 营养 / 习惯（只加字段，不改已有语义）----
+            "blood_vol": round(float(getattr(s, "blood_vol", 0.0) or 0.0), 1),
+            "hb": round(float(getattr(s, "hb", 0.0) or 0.0), 1),
+            "hct": round(float(getattr(s, "hct", 0.0) or 0.0), 1),
+            "anemia": str(getattr(s, "anemia", "none") or "none"),
+            "platelet": round(float(getattr(s, "platelet", 0.0) or 0.0), 1),
+            "iron_store": round(float(getattr(s, "iron_store", 0.0) or 0.0), 1),
+            "wbc": round(float(getattr(s, "wbc", 0.0) or 0.0), 2),
+            "neut": round(float(getattr(s, "neut", 0.0) or 0.0), 2),
+            "lymph": round(float(getattr(s, "lymph", 0.0) or 0.0), 2),
+            "crp": round(float(getattr(s, "crp", 0.0) or 0.0), 2),
+            "infection": round(float(getattr(s, "infection", 0.0) or 0.0), 3),
+            "infection_site": str(getattr(s, "infection_site", "") or ""),
+            "fever_drive": round(float(getattr(s, "fever_drive", 0.0) or 0.0), 2),
+            "diet_score": round(float(getattr(s, "diet_score", 0.0) or 0.0), 1),
+            "diet_flags": str(getattr(s, "diet_flags", "") or ""),
+            "weight_kg": round(float(getattr(s, "weight_kg", 0.0) or 0.0), 1),
+            "bmi": round(float(getattr(s, "bmi", 0.0) or 0.0), 1),
+            "habits": _habits.active_list(s),
         }
 
     @API(name="list_foods", description="只读：食物/饮品词表（含别名），供外部校验词能否解析", version="1", public=True)
@@ -2481,6 +2859,23 @@ class LifeBodyPlugin(MaiBotPlugin):
             left = (s.hospital_until - s.t) / H2S
             parts.append(f"正在住院（{s.hospital_reason or '急救中'}，约 {left:.1f} 小时后出院）")
 
+        # ---- v1.4.0：免疫 / 血液 / 生活习惯 ----
+        # 只在"有话说"时出现，三行合起来也不到 40 字，不占注意力。
+        sickness = float(getattr(s, "sickness", 0.0) or 0.0)
+        infection = float(getattr(s, "infection", 0.0) or 0.0)
+        if infection >= 0.20 or sickness >= 0.25:
+            _site = str(getattr(s, "infection_site", "") or "身体不舒服")
+            _temp = float(getattr(s, "temp", 36.8) or 36.8)
+            parts.append(f"在生病（{_site}，体温 {_temp:.1f} ℃），没精神、也没什么胃口")
+        hb = float(getattr(s, "hb", 0.0) or 0.0)
+        if 0.0 < hb < 112.0:
+            parts.append(f"有点贫血（血红蛋白 {hb:.0f} g/L），容易累、上楼会喘")
+        if self._habits_inject:
+            _labels = {h[0]: h[1] for h in _habits.HABITS}
+            _ids = _habits.active_list(s)
+            if _ids:
+                _shown = [_labels.get(i, i) for i in _ids[:4]]
+                parts.append("最近的生活状态：" + "、".join(_shown))
         # ---- 联动侧的"下一步 / 心情参考 / 是否适合打扰"（v1.3.1）----
         # 只有联动开启、且对方给了数据时才出现；一律不写进身体状态。
         _link = self._link

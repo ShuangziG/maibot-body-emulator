@@ -267,6 +267,8 @@
     if (now) now.addEventListener('click', function () { window.maibot.navigate('now', {}); });
     var og = $('btn-organs');
     if (og) og.addEventListener('click', function () { window.maibot.navigate('organs', {}); });
+    var vt = $('btn-vitals');
+    if (vt) vt.addEventListener('click', function () { window.maibot.navigate('vitals', {}); });
     var rf = $('btn-refresh');
     if (rf) rf.addEventListener('click', function () { loadHistory(); loadEvents(); });
     var sel = $('sel-hours');

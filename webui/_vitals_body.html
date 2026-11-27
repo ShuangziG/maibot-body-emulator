@@ -1,0 +1,71 @@
+<div class="maibot-page lb-root" id="lb-vitals-root">
+  <header class="lb-topbar">
+    <div class="lb-brand">
+      <div class="lb-brand-icon" aria-hidden="true">血</div>
+      <div>
+        <h1 class="lb-brand-title">麦麦身体 · 血液与生活习惯</h1>
+        <div class="lb-brand-sub">
+          <span id="hdr-clock">—</span><span>·</span>
+          <span id="hdr-note">血液 / 免疫 / 膳食结构 / 生活习惯</span>
+        </div>
+      </div>
+    </div>
+    <div class="lb-actions">
+      <button type="button" class="lb-btn" id="btn-now">← 此刻</button>
+      <button type="button" class="lb-btn" id="btn-organs">内脏 →</button>
+      <button type="button" class="lb-btn lb-btn-primary" id="btn-refresh">刷新</button>
+    </div>
+  </header>
+
+  <div class="lb-err" id="err"><strong>数据异常：</strong><span id="err-text"></span></div>
+
+  <div class="lb-linkbar" id="illbar">
+    <span class="lb-linkbar-dot"></span>
+    <span class="lb-linkbar-text" id="illbar-text">—</span>
+    <span class="lb-linkbar-meta" id="illbar-meta"></span>
+  </div>
+
+  <section class="lb-card" style="margin-bottom:14px">
+    <div class="lb-card-hd"><h2>血液与免疫</h2><span class="lb-card-sub" id="blood-note">血浆与红细胞分开记账</span></div>
+    <div class="lb-grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))" id="blood-groups"></div>
+  </section>
+
+  <section class="lb-card" style="margin-bottom:14px">
+    <div class="lb-card-hd"><h2>膳食营养结构</h2><span class="lb-card-sub" id="nut-note">按成年女性推荐量评分</span></div>
+    <div class="lb-vscore">
+      <div class="lb-vscore-ring" id="score-ring"><b id="score-num">—</b></div>
+      <div class="lb-vscore-body">
+        <div class="lb-gut-row"><span>三大供能比（蛋白 / 脂肪 / 碳水）</span><b id="macro-text">—</b></div>
+        <div class="lb-macro" id="macro-bars"></div>
+        <div class="lb-flags" id="nut-flags"></div>
+      </div>
+    </div>
+    <div class="lb-grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:14px" id="nut-groups"></div>
+  </section>
+
+  <section class="lb-card" style="margin-bottom:14px">
+    <div class="lb-card-hd">
+      <h2>生活习惯</h2>
+      <span class="lb-card-sub" id="habit-note">从状态反推，不产生任何生理后果</span>
+    </div>
+    <div class="lb-grid" style="grid-template-columns:1fr 1fr;gap:14px">
+      <div>
+        <div class="lb-subhd">正在符合（<span id="habit-on-count">0</span>）</div>
+        <div class="lb-habits" id="habit-on"></div>
+      </div>
+      <div>
+        <div class="lb-subhd">未符合</div>
+        <div class="lb-habits" id="habit-off"></div>
+      </div>
+    </div>
+    <div class="lb-note" style="margin-top:12px">
+      判定阈值与出处见 README 第「生活习惯」节；标 <span class="lb-tag">代理</span> 的三项
+      （冥想 / 松弛 / 工作狂 / 久坐）在本模型里没有对应动作，由生理与作息状态反推。
+    </div>
+  </section>
+
+  <div class="lb-foot">
+    本页只读，不做仿真推进。血液、免疫、营养与习惯的定量依据见插件目录下的
+    REFERENCES.md；判定阈值见 body/habits.py 与 body/nutrition.py 的模块头。
+  </div>
+</div>

@@ -126,6 +126,7 @@
     <div class="lb-actions">
       <button type="button" class="lb-btn" id="btn-timeline">时间线 →</button>
       <button type="button" class="lb-btn" id="btn-organs">内脏细则 →</button>
+      <button type="button" class="lb-btn" id="btn-vitals">血液与习惯 →</button>
       <button type="button" class="lb-btn lb-btn-primary" id="btn-refresh">刷新实况</button>
     </div>
   </header>
@@ -179,6 +180,11 @@
   <div class="lb-grid" style="grid-template-columns:1.4fr 1fr;margin-bottom:14px" id="sleep-cycle-grid">
     <section class="lb-card">
       <div class="lb-card-hd"><h2>睡眠结构</h2><span class="lb-card-sub" id="sl-stage">—</span></div>
+      <!-- 2026-11-26：v1.4.0 起「一整夜」是独立口径 —— 同一夜被中途醒来打断的
+           几段 bout 已经合并（见 engine._merge_into_night），这里显示的是合并后
+           的整夜，而不是「当前这一觉」。睡眠中的实时分期另占一行。 -->
+      <div class="lb-gut-row"><span>最近一夜</span><b id="sl-night">—</b></div>
+      <div class="lb-gut-row"><span>整夜构成</span><b id="sl-night-split">—</b></div>
       <div class="lb-gut-row"><span>当前周期</span><b id="sl-cycle">—</b></div>
       <div class="lb-sleep-bar" id="sl-bar"></div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px">
@@ -507,6 +513,28 @@
     txt('sl-cycle', sl.sleeping
       ? '周期进度 ' + Math.round((Number(sl.cycle_pos) || 0) * 100) + '%'
       : '—');
+    // ---- 最近一夜（2026-11-26 新增）----
+    // 后端 sleep.last_night 已经把同一夜的多段 bout 合并好了。这里只负责显示，
+    // 不重算 —— 合并口径（正午分界、按小时加权）属于引擎，前端再算一份必然漂移。
+    var ln = sl.last_night || {};
+    var lnH = Number(ln.hours) || 0;
+    if (lnH > 0) {
+      var frag = '';
+      if (Number(ln.bouts) > 1) {
+        frag = ' · 分 ' + Number(ln.bouts) + ' 段';
+      }
+      txt('sl-night', num(ln.hours, 1) + ' 小时' + frag);
+      var parts = [];
+      parts.push('浅 ' + num(ln.light_h, 1));
+      parts.push('深 ' + num(ln.deep_h, 1));
+      parts.push('REM ' + num(ln.rem_h, 1));
+      if (Number(ln.cycles) > 0) parts.push(Number(ln.cycles) + ' 周期');
+      if (Number(ln.wakes) > 0) parts.push('醒 ' + Number(ln.wakes) + ' 次');
+      txt('sl-night-split', parts.join(' · '));
+    } else {
+      txt('sl-night', '—');
+      txt('sl-night-split', '—');
+    }
     // 睡眠结构条：四段占比
     var bar = $('sl-bar');
     if (bar) {
@@ -869,30 +897,69 @@
     var iw = Math.max(10, cssW - padL - padR);
     var ih = Math.max(24, cssH - padT - padB);
 
-    // 找最近一段睡眠：从最后一个非清醒采样往前扩，
-    // 容忍 <= 4 个采样（约 4 分钟）的短暂觉醒 —— 夜里翻个身不该把整夜切成两段。
-    var last = -1;
-    for (var i = stages.length - 1; i >= 0; i--) {
-      if (stages[i] && stages[i] !== 'awake') { last = i; break; }
+    // ---- 定锚：优先用后端给出的「这一夜」真实区间（2026-11-26）----
+    //
+    // 旧实现从最后一个非清醒采样往前扩，容忍 <= 4 个采样。问题是它不知道
+    // "一夜"是什么：一个 13:20 的午睡只要是目前唯一一段非清醒数据，就会被
+    // 当成"最近一段睡眠"画进「夜间分期图」（服务器存档实测确实如此）。
+    //
+    // 现在改成：拿 sleep.last_night 的 start_t / end_t（仿真秒）去和 history
+    // 的 times 对齐数组比对。这两者同属仿真时间轴，可以精确切段，
+    // 跨天也不会混淆（labels 只有 "HH:MM"，每天都有一次，不能用来做区间判断）。
+    var times = h.times || [];
+    var ln = (STATE.now && STATE.now.sleep && STATE.now.sleep.last_night) || {};
+    var last = -1, start = -1;
+
+    // 优先用后端给的「这一夜」真实起止时刻（仿真秒），精确切段。
+    if (times.length === stages.length && Number(ln.hours) > 0
+        && ln.start_t !== undefined && ln.end_t !== undefined) {
+      var tA = Number(ln.start_t) || 0;
+      var tB = Number(ln.end_t) || 0;
+      if (tB > tA) {
+        for (var i = 0; i < times.length; i++) {
+          var tv = Number(times[i]) || 0;
+          if (tv >= tA && tv <= tB) {
+            if (start < 0) start = i;
+            last = i;
+          }
+        }
+      }
     }
-    if (last < 0) {
-      if (note) note.textContent = '最近 ' + (h.hours || 12) + ' 小时没有睡眠记录';
-      ctx.fillStyle = col.muted;
-      ctx.font = '11px sans-serif';
-      ctx.fillText('暂无夜间数据', padL, padT + ih / 2);
-      return;
-    }
-    var start = last;
-    while (start > 0) {
-      if (stages[start - 1] !== 'awake') { start--; continue; }
-      var j = start - 1;
-      while (j >= 0 && stages[j] === 'awake') { j--; }
-      if (j >= 0 && (start - 1 - j) <= 4) { start = j; } else { break; }
+
+    // 兜底：没有 last_night（老存档 / 还没睡过）时退回旧的采样回溯法。
+    // 注意这条路径仍可能把午睡当成夜间睡眠，只在拿不到 last_night 时使用。
+    if (start < 0 || last < 0) {
+      for (var m = stages.length - 1; m >= 0; m--) {
+        if (stages[m] && stages[m] !== 'awake') { last = m; break; }
+      }
+      if (last < 0) {
+        if (note) note.textContent = '最近 ' + (h.hours || 12) + ' 小时没有睡眠记录';
+        ctx.fillStyle = col.muted;
+        ctx.font = '11px sans-serif';
+        ctx.fillText('暂无夜间数据', padL, padT + ih / 2);
+        return;
+      }
+      start = last;
+      while (start > 0) {
+        if (stages[start - 1] !== 'awake') { start--; continue; }
+        var j = start - 1;
+        while (j >= 0 && stages[j] === 'awake') { j--; }
+        if (j >= 0 && (start - 1 - j) <= 4) { start = j; } else { break; }
+      }
     }
     var n = last - start + 1;
     if (note) {
       var stillSleeping = stages[stages.length - 1] !== 'awake';
-      note.textContent = '共 ' + (n / 60).toFixed(1) + ' 小时 · 入睡 ' + (labels[start] || '') +
+      var fragTxt = Number(ln.bouts) > 1 ? ' · 分 ' + Number(ln.bouts) + ' 段' : '';
+      // 时长用真实时间戳算，不能再用 n/60。
+      // 原实现假设「1 个采样点 = 1 分钟」，但 history 载荷会被宿主预算
+      // 降采样（stride 可达数倍），此时 n/60 会把 5 小时显示成 0.5 小时。
+      var spanH = n / 60;
+      if (times.length === stages.length && Number(times[last]) > Number(times[start])) {
+        spanH = (Number(times[last]) - Number(times[start])) / 3600.0;
+      }
+      note.textContent = '共 ' + spanH.toFixed(1) + ' 小时' + fragTxt +
+        ' · 入睡 ' + (labels[start] || '') +
         ' · ' + (stillSleeping ? '仍在睡' : '醒来 ' + (labels[last] || ''));
     }
 
@@ -1068,6 +1135,8 @@
     if (tl) tl.addEventListener('click', function () { window.maibot.navigate('timeline', {}); });
     var og = $('btn-organs');
     if (og) og.addEventListener('click', function () { window.maibot.navigate('organs', {}); });
+    var vt = $('btn-vitals');
+    if (vt) vt.addEventListener('click', function () { window.maibot.navigate('vitals', {}); });
   }
 
   function boot() {

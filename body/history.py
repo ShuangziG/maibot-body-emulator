@@ -30,8 +30,10 @@ HOST_BYTE_LIMIT = 512 * 1024
 # 加几个字段时不必重算预算。
 ELEMENT_BUDGET = 19000
 
-# 每个采样点固定贡献的数组：labels / days / stages 三个对齐列。
-ALIGNED_ARRAYS = 3
+# 每个采样点固定贡献的数组：labels / days / stages / times 四个对齐列。
+# 2026-11-26 新增 times：夜间分期图要按「这一夜」的真实起止时刻截取区间，
+# 光有 "HH:MM" 字符串无法跨天区分（同一个钟点每天都有一次）。
+ALIGNED_ARRAYS = 4
 
 # 降采样后至少保留的点数：再少曲线形状就失真了。
 MIN_POINTS = 24
@@ -114,6 +116,9 @@ def _payload(
         "labels": [str(p.get("clock", "")) for p in picked],
         "days": [int(p.get("day", 1) or 1) for p in picked],
         "stages": [str(p.get("sleep_stage") or "awake") for p in picked],
+        # times：仿真时刻（秒）。前端用它把分期图裁到「这一夜」的区间里，
+        # 否则一天里的午睡会被当成"最近一段睡眠"画上夜间分期图。
+        "times": [_round(p.get("t", 0.0), 1) for p in picked],
         "series": {key: [_round(p.get(key, 0.0), 2) for p in picked] for key in keys},
         "now": now if isinstance(now, dict) else {},
     }

@@ -51,6 +51,14 @@ class Food:
     kcal: float
     gi: int
     selectable: bool = True   # Chyle 是消化中间物，不作为可选食物
+    # ---- v1.4.0 新增：膳食营养结构需要的五项（见 body/nutrient_profile.py）----
+    # 放在末尾且全部有默认值：本表 23 项与 food_extra 的 288 项都是位置参数
+    # 构造的，加在尾部才不会让既有行整体错位。
+    fiber_g: float = 0.0      # 膳食纤维 g/份
+    k_mg: float = 0.0         # 钾 mg/份
+    ca_mg: float = 0.0        # 钙 mg/份
+    fe_mg: float = 0.0        # 铁 mg/份
+    vc_mg: float = 0.0        # 维生素 C mg/份
 
 
 # ----------------------------------------------------------------------
@@ -96,6 +104,60 @@ def get(key: str) -> Food:
 
 
 # ----------------------------------------------------------------------
+# 23 项基础食物的膳食纤维与四种微量营养素（每份）
+#
+# 数据来源：《中国食物成分表（第 6 版）》与 USDA FoodData Central，
+# 按本表各自的"一份"份量折算。这一级是**逐项真值**，不走画像表；
+# 288 项扩展食物才走 nutrient_profile.profile_for 的类别画像。
+# 单位：fiber_g / k_mg / ca_mg / fe_mg / vc_mg
+# ----------------------------------------------------------------------
+_BASE_MICRO = {
+    "Chyle": dict(fiber_g=0.0, k_mg=0.0, ca_mg=0.0, fe_mg=0.0, vc_mg=0.0),
+    "Water": dict(fiber_g=0.0, k_mg=1.0, ca_mg=2.0, fe_mg=0.0, vc_mg=0.0),
+    "SmallWater": dict(fiber_g=0.0, k_mg=0.5, ca_mg=1.0, fe_mg=0.0, vc_mg=0.0),
+    "Milk": dict(fiber_g=0.0, k_mg=380.0, ca_mg=300.0, fe_mg=0.1, vc_mg=1.0),
+    "Coke": dict(fiber_g=0.0, k_mg=10.0, ca_mg=5.0, fe_mg=0.1, vc_mg=0.0),
+    "Beer": dict(fiber_g=0.0, k_mg=90.0, ca_mg=15.0, fe_mg=0.1, vc_mg=0.0),
+    "Wine": dict(fiber_g=0.0, k_mg=60.0, ca_mg=5.0, fe_mg=0.2, vc_mg=0.0),
+    "Vodka": dict(fiber_g=0.0, k_mg=1.0, ca_mg=0.0, fe_mg=0.0, vc_mg=0.0),
+    "Coffee": dict(fiber_g=0.0, k_mg=120.0, ca_mg=5.0, fe_mg=0.1, vc_mg=0.0),
+    "EnergyDrink": dict(fiber_g=0.0, k_mg=10.0, ca_mg=5.0, fe_mg=0.1, vc_mg=0.0),
+    "OrangeJuice": dict(fiber_g=0.5, k_mg=500.0, ca_mg=25.0, fe_mg=0.2, vc_mg=60.0),
+    "Chicken": dict(fiber_g=0.0, k_mg=300.0, ca_mg=15.0, fe_mg=0.9, vc_mg=0.0),
+    "Pork": dict(fiber_g=0.0, k_mg=320.0, ca_mg=12.0, fe_mg=1.2, vc_mg=0.0),
+    "Egg": dict(fiber_g=0.0, k_mg=75.0, ca_mg=32.0, fe_mg=1.0, vc_mg=0.0),
+    "Salmon": dict(fiber_g=0.0, k_mg=400.0, ca_mg=15.0, fe_mg=0.5, vc_mg=0.0),
+    "Rice": dict(fiber_g=0.8, k_mg=60.0, ca_mg=10.0, fe_mg=0.4, vc_mg=0.0),
+    "Bread": dict(fiber_g=2.0, k_mg=90.0, ca_mg=40.0, fe_mg=0.9, vc_mg=0.0),
+    "Pizza": dict(fiber_g=3.0, k_mg=250.0, ca_mg=220.0, fe_mg=2.0, vc_mg=3.0),
+    "Soup": dict(fiber_g=1.0, k_mg=250.0, ca_mg=20.0, fe_mg=0.5, vc_mg=2.0),
+    "Apple": dict(fiber_g=4.0, k_mg=220.0, ca_mg=10.0, fe_mg=0.3, vc_mg=9.0),
+    "Banana": dict(fiber_g=2.0, k_mg=420.0, ca_mg=8.0, fe_mg=0.3, vc_mg=10.0),
+    "Nut": dict(fiber_g=3.0, k_mg=250.0, ca_mg=45.0, fe_mg=1.4, vc_mg=0.5),
+    "Chocolate": dict(fiber_g=3.5, k_mg=180.0, ca_mg=30.0, fe_mg=4.0, vc_mg=0.0),
+}
+
+
+def _apply_base_micro() -> int:
+    """把 _BASE_MICRO 写进 23 项基础食物（frozen dataclass 用 replace）。"""
+    import dataclasses
+    n = 0
+    for key, micro in _BASE_MICRO.items():
+        f = FOODS.get(key)
+        if f is None:
+            continue
+        FOODS[key] = dataclasses.replace(f, **micro)
+        n += 1
+    if n:
+        ALL_FOODS[:] = list(FOODS.values())
+        SELECTABLE[:] = [x for x in ALL_FOODS if x.selectable]
+    return n
+
+
+_BASE_MICRO_APPLIED = _apply_base_micro()
+
+
+# ----------------------------------------------------------------------
 # 三餐组合策略
 #   不是随机撒——按现实的中式/西式混搭习惯给出候选池。
 #   2026-11-11 起每餐补足副食项，使总容积达到七分饱以上（午餐/晚餐
@@ -105,13 +167,30 @@ MEAL_POOLS = {
     "breakfast": [["Milk", "Bread", "Egg", "Apple"], ["Coffee", "Bread", "Egg", "Banana"],
                   ["Milk", "Banana", "Nut", "Bread"], ["OrangeJuice", "Bread", "Egg", "Apple"],
                   ["Coffee", "Chocolate", "Bread", "Egg", "Banana"]],
-    "lunch": [["Rice", "Chicken", "Soup"], ["Rice", "Pork", "Soup"],
-              ["Rice", "Salmon", "Soup"], ["Pizza", "Coke", "Apple"],
-              ["Rice", "Egg", "Apple", "Soup"], ["Bread", "Chicken", "Soup", "Apple"]],
-    "dinner": [["Rice", "Pork", "Apple", "Soup"], ["Rice", "Salmon", "Soup"],
-               ["Pizza", "Beer", "Apple"], ["Rice", "Chicken", "Banana", "Soup"],
-               ["Bread", "Egg", "Soup", "Apple"], ["Rice", "Pork", "Wine", "Soup"],
-               ["Rice", "Chicken", "Beer"]],
+    # 2026-11-27（v1.4.0）：午/晚餐改成「菜名搭配」，不再拼食材。
+    # 旧写法 ["Rice","Chicken","Soup"] 在面板上显示为「米饭 + 鸡胸肉 + 汤」——
+    # 看不出这一顿是什么，而库里 288 项中式食物明明有黄焖鸡、酸菜鱼、宫保鸡丁。
+    # 容积仍按 640~840 mL 配（≈7~9 分饱），每份约 500~760 kcal。
+    "lunch": [
+        ["Rice", "BraisedChickenRice", "SeaweedSoup"],                  # 米饭+黄焖鸡+紫菜汤
+        ["Rice", "KungPaoChicken", "TomatoEggSoup", "CucumberSalad"],    # 米饭+宫保鸡丁+番茄蛋汤+凉拌黄瓜
+        ["Rice", "RedBraisedPork", "KelpTofuSoup", "StirFriedGreens"],   # 米饭+红烧肉+海带豆腐汤+炒青菜
+        ["BeefNoodles", "CucumberSalad"],                               # 牛肉面+凉拌黄瓜
+        ["Rice", "FishWithPickles", "StirFriedGreens"],                 # 米饭+酸菜鱼+炒青菜
+        ["YangzhouFriedRice", "TomatoEggSoup"],                         # 扬州炒饭+番茄蛋汤
+        ["ClaypotRice", "KelpTofuSoup"],                                # 煲仔饭+海带豆腐汤
+        ["Pizza", "Coke", "Apple"],                                     # 披萨+可乐+苹果
+    ],
+    "dinner": [
+        ["Rice", "SweetSourPork", "SeaweedSoup", "StirFriedGreens"],     # 米饭+糖醋里脊+紫菜汤+炒青菜
+        ["Rice", "BraisedBeef", "TomatoEggSoup", "CucumberSalad"],       # 米饭+酱牛肉+番茄蛋汤+凉拌黄瓜
+        ["Rice", "BraisedShrimp", "KelpTofuSoup", "CucumberSalad"],      # 米饭+油焖大虾+海带豆腐汤+凉拌黄瓜
+        ["Pasta", "TomatoEgg", "VegSalad"],                             # 意面+番茄炒蛋+蔬菜沙拉
+        ["Rice", "MapoTofu", "KelpTofuSoup", "StirFriedGreens"],         # 米饭+麻婆豆腐+海带豆腐汤+炒青菜
+        ["BraisedPorkRice", "SeaweedSoup", "StirFriedGreens"],          # 卤肉饭+紫菜汤+炒青菜
+        ["Skewers", "Beer"],                                            # 串串+啤酒
+        ["Rice", "TwiceCookedPork", "TomatoEggSoup", "StirFriedGreens"], # 米饭+回锅肉+番茄蛋汤+炒青菜
+    ],
 }
 
 # 口渴时的补给选择（按口渴程度权重）
@@ -151,7 +230,10 @@ def pick_snack(rng) -> list:
 #   顺序有意义：长词在前，避免「鸡」先命中「黄焖鸡」。
 # ----------------------------------------------------------------------
 FOOD_ALIASES = [
-    ("黄焖鸡米饭", ["Chicken", "Rice"]), ("鸡米饭", ["Chicken", "Rice"]),
+    # 2026-11-27（v1.4.0）：黄焖鸡米饭是「一菜 + 一饭」两件东西。旧版拆成
+    # Chicken+Rice，把菜换成生鸡胸肉；而扩展表又把它整体映射到黄焖鸡（那份不含饭），
+    # 一碗饭 230 kcal 就此丢失。现在统一落到「黄焖鸡 + 米饭」。
+    ("黄焖鸡米饭", ["BraisedChickenRice", "Rice"]), ("鸡米饭", ["Chicken", "Rice"]),
     ("生榨米粉", ["Rice"]), ("米粉", ["Rice"]), ("米线", ["Rice"]),
     ("河粉", ["Rice"]), ("炒饭", ["Rice", "Egg"]), ("盖饭", ["Rice"]),
     ("米饭", ["Rice"]), ("白饭", ["Rice"]), ("粥", ["Rice"]),
@@ -259,6 +341,8 @@ _DECOMPOSE_KEYS = [
     ("Chocolate", "巧克力"), ("Coffee", "咖啡"), ("Water", "水"),
     ("Coke", "可乐"), ("OrangeJuice", "橙汁"), ("EnergyDrink", "能量饮料"),
     ("Beer", "啤酒"), ("Wine", "葡萄酒"), ("Vodka", "白酒"),
+    # 2026-11-27（v1.4.0）：黄焖鸡是「一菜」的计价单位，饭另算。
+    ("BraisedChickenRice", "黄焖鸡"),
 ]
 
 # 代码围栏标记（避免在源码里直接写字面反引号）。
@@ -277,7 +361,16 @@ _DECOMPOSE_PROMPT = """你在把"人吃掉的一份食物"拆成实际进入身�
    早餐补 "Bread"，午晚餐补 "Rice"。
 4. 饮品只给饮品 key，不要补主食。
 5. 完全认不出任何食物，输出 []。
-6. 最多 {limit} 项，去重。
+6. 最多 {limit} 项，去重。**一般 2~4 项就够**：只列真正吃进去的东西，
+   绝不允许把上面那张表整段抄下来，也不要为了凑数乱加。
+   如果是一道真实存在、但表里没有对应项的菜，就按它的主要成分给（干锅/香锅类 ->
+   肉 + 菜 + 食用油；炖菜类 -> 肉 + 菜），宁可粗一点，也不要输出空数组。
+7. 菜名若是「一道菜 + 一份主食」的并列叫法，要拆成两件、两件都留：
+   黄焖鸡米饭 -> ["BraisedChickenRice","Rice"]；番茄牛腩饭 -> ["BeefBrisket","Rice"]。
+   但库里那条本身就把饭算进去了（卤肉饭、扬州炒饭、蛋炒饭、盖饭、拌饭这类）时就
+   不要再补米饭，否则同一碗饭会被记两遍。
+8. 能用食材就用食材（鸡肉、猪肉、青菜、米饭）；只有整份单卖的菜（黄焖鸡、
+   宫保鸡丁、红烧肉、酸菜鱼这类）才用菜名，不要退化成生食材。
 
 要拆解的内容：{text}
 JSON 数组："""
@@ -432,8 +525,16 @@ def ensure_meal_size(keys, target: float = MEAL_TARGET_ML) -> list:
 
 
 def combo_summary(keys) -> str:
-    """把一组食物 key 翻成一句中文，如「米饭 + 鸡胸肉 + 汤」。"""
+    """把一组食物 key 翻成一句中文，如「米饭 + 黄焖鸡 + 紫菜汤」。
+
+    带空格是为了塞进对话/日志的自然语句；面板上的候选池用 combo_compact()。
+    """
     return " + ".join(FOODS[k].label for k in keys if k in FOODS)
+
+
+def combo_compact(keys) -> str:
+    """紧凑写法，给候选池卡片用：「米饭+黄焖鸡+紫菜汤」。"""
+    return "+".join(FOODS[k].label for k in keys if k in FOODS)
 
 
 # ----------------------------------------------------------------------
@@ -513,7 +614,9 @@ def combo_totals(keys) -> dict:
     """合计一组食物的全部成分，用于写事件与自检。"""
     tot = {"volume_ml": 0.0, "water_ml": 0.0, "na_mmol": 0.0, "carb_g": 0.0,
            "protein_g": 0.0, "fat_g": 0.0, "alcohol_g": 0.0,
-           "caffeine_mg": 0.0, "kcal": 0.0}
+           "caffeine_mg": 0.0, "kcal": 0.0,
+           # v1.4.0：膳食营养结构要用的五项，缺了它们 nutrition 侧无法记账
+           "fiber_g": 0.0, "k_mg": 0.0, "ca_mg": 0.0, "fe_mg": 0.0, "vc_mg": 0.0}
     for k in keys:
         f = FOODS.get(k)
         if not f:

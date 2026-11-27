@@ -35,7 +35,11 @@ class BodyState:
     sbp: float = 120.0        # 收缩压               [APK: BP]
     dbp: float = 80.0         # 舒张压               [APK: BP]
     pp: float = 40.0          # 脉压                 [推导]
-    blood_vol: float = 5000.0 # 循环血量 mL          [APK: Blood Volume]
+    # 循环血量（v1.4.0 起由 blood.step 导出 = 血浆量 + 红细胞量）。
+    # 旧值 5000 mL 对应"80 kg 男性"，与 42 L 总体水（≈60 kg 女性）不自洽；
+    # 现改为 4000 mL（67 mL/kg，[R22]）。各处引用已按 BV_REF_ML 换算，
+    # 基线行为不变，但"失血/贫血"从此有了真实的分母。
+    blood_vol: float = 4000.0 # 循环血量 mL          [APK: Blood Volume]
 
     # ---- 呼吸 ----
     rr: float = 14.0          # 呼吸频率             [APK: RR]
@@ -433,10 +437,61 @@ class BodyState:
     sleep_bout_deep_sec: float = 0.0  # 当前 bout 深睡（秒）
     sleep_bout_rem_sec: float = 0.0   # 当前 bout REM（秒）
     sleep_bout_wakes: int = 0         # 当前 bout 内被唤醒次数
+    # 2026-11-26：本段 bout 开始时 stage_index 的基线。
+    # 周期序号现在按「夜」连续累加，所以「本段 bout 跑过几个周期」
+    # = stage_index - 基线 + 1；直接用 stage_index+1 会把上一段的也算进来。
+    sleep_bout_cycle_base: int = 0
+    # 当前周期序号归属的夜（_night_key）。变了才把 stage_index 归零。
+    stage_night_key: int = -999999999
+    # 最近一次「合格」bout 的结构快照（2026-11-27 新增）。
+    #
+    # 为什么需要它：午睡结算会把 bout 账本清零（_reset_bout_ledger），
+    # 而 _sleep_view() 在账本为 0 时回落到 dur_light/dur_deep/dur_rem ——
+    # 那三个累计量只在「新一段 bout 入睡」时清零（engine.py 入睡分支），
+    # 午睡分支从不碰它。于是午睡结束后面板「浅睡 / 深睡 / REM」显示的
+    # 是午睡时长，直到当晚真正入睡才恢复。
+    # 服务器存档实测（2026-11-27 d18）：dur_light=1560s、dur_deep=690s，
+    # 面板显示 0.4h / 0.2h，正是 13:38-14:49 那场午睡。
+    #
+    # 快照存「秒」，与 bout 账本同单位；只在合格 bout 结算时写入，午睡不写。
+    # _sleep_view() 的回落目标改为它，午睡就再也污染不了结构行。
+    # 形如 {"light_s":.., "deep_s":.., "rem_s":.., "awake_s":..,
+    #       "hours":.., "quality":.., "end_t":..}
+    sleep_last_struct: dict = field(default_factory=dict)
     # 最近若干段「合格」的连续睡眠（只看 >= min_bout_hours 的 bout，午睡不计）。
     # 每项形如 {"end_t": 仿真秒, "hours": 连续睡眠小时, "quality": 0~100,
     #           "light_h":..., "deep_h":..., "rem_h":..., "efficiency":...}
     sleep_bouts: list = field(default_factory=list)
+    # 最近若干「夜」——2026-11-26 新增的聚合层。
+    #
+    # 为什么需要它：bout 是「连续睡眠区间」，被中途醒来切断就会分成两段；
+    # 但用户要的是「一整夜不管中途醒没醒都算一块」。两者不等价：
+    # 23:10 睡到 02:00、醒 1 小时、03:00 再睡到 07:20，这是**一夜**，
+    # 却是**两段 bout**。之前用 len(sleep_bouts) 当夜数，于是同一夜被
+    # 数了两次（服务器实测 7 天报出 11 夜）。
+    #
+    # 分界取**正午 12:00**（见 engine._night_key）：以正午为界是睡眠医学
+    # 划分「一夜」的常规做法 —— 凌晨 3 点入睡仍属于前半夜那一晚，而不是
+    # 新的一夜。午夜 0 点分界会把 23:00-07:00 劈成两夜，不可用。
+    #
+    # 每项形如：
+    #   {"key": 夜序号, "start_t": 最早入睡, "end_t": 最晚醒来,
+    #    "hours": 累计睡眠小时, "bout_h": 累计在床小时,
+    #    "quality": 按小时加权评分, "efficiency": 按小时加权效率,
+    #    "light_h": ..., "deep_h": ..., "rem_h": ...,
+    #    "wakes": 夜内被唤醒次数, "bouts": 合并了几段 bout,
+    #    "cycles": 本夜累计的 NREM-REM 周期数}
+    sleep_nights: list = field(default_factory=list)
+    # 「夜归属」规则版本（2026-11-27）。
+    #
+    # 1（旧）：每段 bout 的夜 key 用**醒来时刻** + 当时的 clock_offset 现算；
+    #         clock_offset 可变（sync_clock 同步、重启按墙钟重对齐），于是同一段
+    #         bout 的归属会随时间改变。服务器实测出现 key=17 的夜跨度 33.6 小时，
+    #         把 d17 夜和 d18 夜并成了一夜（hours=16.11、cycles=5）。
+    # 2（新）：结算时按**入睡时刻**算一次并写进 bout["night_key"] 固化，之后只读。
+    #
+    # 存档里这个值 < 2 时，_restore() 会用 sleep_bouts 整体重建一次 nights。
+    sleep_night_rule: int = 1
     # 近 7 日汇总（7 日滑动聚合，PSQI 成分的周度类比，**不是 PSQI**）：总睡眠小时、平均睡眠效率、平均评分、合格夜数、
     # 被过滤掉（<4h 或午睡）的段数。由 _recompute_sleep_week() 计算。
     sleep_week_hours: float = 0.0
@@ -525,6 +580,122 @@ class BodyState:
     hospital_since: float = 0.0
     hospital_visits: int = 0
     hospital_reason: str = ""
+
+    # ==================================================================
+    # 血液系统（v1.4.0 新增，见 body/blood.py）
+    # ==================================================================
+    # 血浆量由总体水导出（body_water 是守恒量），红细胞量独立记账。
+    # 两者分开的必要性：失血时红细胞是"永久损失"（要靠骨髓几周补回来），
+    # 血浆是"可以先从组织间液借"—— 混成一个量就表达不出"失血早期
+    # 血红蛋白不降、补液后反而被稀释"这个临床现象。
+    plasma_vol: float = 2400.0       # mL，血浆量（导出）
+    rbc_mass: float = 1600.0         # mL，红细胞容量（独立状态）
+    hb: float = 136.0                # g/L，血红蛋白（由红细胞量导出）
+    hct: float = 40.0                # %，红细胞压积
+    cao2: float = 17.9               # mL/dL，动脉血氧含量
+    do2: float = 1000.0              # mL/min，氧输送 = CO×CaO2×10
+    o2_deficit: float = 0.0          # 0-1，氧输送缺口（组织缺氧信号）
+    epo: float = 1.0                 # 促红素驱动信号 [R25]
+    iron_store: float = 400.0        # mg，储存铁 [R26]
+    fe_intake_24h: float = 0.0       # mg/天，膳食铁 EMA
+    fe_absorb_frac: float = 0.12     # 当前铁吸收分数
+    fe_bleed_pending: float = 0.0    # mg，待扣的失血铁
+    retic_pct: float = 0.8           # %，网织红细胞
+    platelet: float = 250.0          # ×10^9/L [R30]
+    clot: float = 0.0                # 0-1，止血/凝血进程 [APK: PlateletClot]
+    bleed_rate: float = 0.0          # mL/min，当前出血速率
+    bleed_target_ml: float = 0.0     # mL，本次出血目标总量
+    bleed_done_ml: float = 0.0       # mL，本次已出血量
+    bleed_site: str = ""             # 出血部位（展示）
+    menstrual_loss_ml: float = 0.0   # mL，本周期累计经血
+    menstrual_target_ml: float = 35.0  # mL，本周期经血总量目标 [R27]
+    blood_loss_24h: float = 0.0      # mL/天，失血速率 EMA
+    anemia: str = "none"             # 贫血分级 none/mild/moderate/severe [R50]
+
+    # ==================================================================
+    # 免疫系统（v1.4.0 新增，见 body/immune.py）
+    # ==================================================================
+    # 三类白细胞分开记：不同病原的应答方向不同（细菌升中性粒、
+    # 病毒升淋巴），合成一个 wbc 就表达不出这个区别 [R31]。
+    wbc: float = 6.5                 # ×10^9/L
+    neut: float = 3.6                # ×10^9/L 中性粒
+    lymph: float = 2.0               # ×10^9/L 淋巴
+    mono: float = 0.45               # ×10^9/L 单核
+    il6: float = 1.5                 # pg/mL [R32]
+    crp: float = 1.0                 # mg/L [R48]
+    infection: float = 0.0           # 0-1，感染负荷
+    infection_peak: float = 0.0      # 本次感染峰值
+    infection_day: float = -1.0      # 本次感染已进展天数（-1 = 无感染）
+    infection_type: str = ""         # viral / bacterial
+    infection_site: str = ""         # 感染部位描述
+    infection_count: int = 0         # 累计感染次数
+    immunity_days: float = 0.0       # 感染后短期抵抗剩余天数
+    immune_tone: float = 1.0         # 免疫张力（易感性主控量）
+    fever_drive: float = 0.0         # ℃，致热驱动（叠加到体温调定点）
+    sickness: float = 0.0            # 0-1，生病行为强度 [R34]
+    infection_roll_day: float = -1.0 # 上次掷易感骰子的日序
+
+    # ==================================================================
+    # 膳食营养结构（v1.4.0 新增，见 body/nutrition.py）
+    # ==================================================================
+    # 当日账本：跨零点清零。评分的推荐量见 nutrition.RECOMMEND。
+    nut_kcal: float = 0.0            # 今日摄入 kcal
+    nut_protein_g: float = 0.0
+    nut_fat_g: float = 0.0
+    nut_carb_g: float = 0.0
+    nut_fiber_g: float = 0.0         # 膳食纤维 [R38]
+    nut_k_mg: float = 0.0
+    nut_ca_mg: float = 0.0
+    nut_fe_mg: float = 0.0
+    nut_vc_mg: float = 0.0
+    nut_na_mg: float = 0.0
+    nut_junk_kcal: float = 0.0       # 来自垃圾食品的 kcal
+    nut_day: float = -1.0            # 账本所属日序
+    nut_meals_today: int = 0
+    # 评分与派生
+    diet_score: float = 50.0         # 0-100 膳食质量分 [R39]
+    diet_flags: str = ""             # 缺乏/超标项（逗号分隔）
+    protein_per_kg: float = 0.0      # g/kg
+    fat_share: float = 0.0           # 脂肪供能比
+    carb_share: float = 0.0          # 碳水供能比
+    protein_share: float = 0.0       # 蛋白供能比
+    junk_share: float = 0.0          # 垃圾食品供能占比
+    junk_streak: float = 0.0         # 连续高垃圾食品天数
+    energy_need_kcal: float = 1800.0 # 估算需求
+    energy_balance_kcal: float = 0.0 # 累计能量盈亏
+    weight_kg: float = 55.0          # 派生体重（盈亏/7700 kg）
+    bmi: float = 21.0                # 派生 BMI（中国标准）
+
+    # ==================================================================
+    # 生活习惯判定（v1.4.0 新增，见 body/habits.py）
+    # ==================================================================
+    # 纯判定层：这里的字段只是"判定结果与判定所需的计数器"，
+    # 没有任何一项会反过来影响生理量 —— 用户要求习惯零副作用。
+    habits_active: str = ""          # 命中的习惯 id（逗号分隔）
+    habits_count: int = 0
+    relax_minutes_today: float = 0.0 # 今日放松状态累计分钟
+    relax_segment_max_min: float = 0.0  # 今日最长一段连续放松
+    relax_seg_cur: float = 0.0       # 当前放松段时长（内部）
+    awake_minutes_today: float = 0.0
+    water_ml_today: float = 0.0      # 今日饮水累计
+    ex_minutes_today: float = 0.0    # 今日运动累计
+    ex_week_cardio_min: float = 0.0  # 本周有氧分钟（7 日滑窗）
+    ex_week_strength_min: float = 0.0
+    ex_week_yoga_min: float = 0.0
+    ex_week_strength_sessions: float = 0.0
+    late_night_days: float = 0.0     # 本周 23:00 后仍清醒的天数
+    late_night_mark: float = -1.0    # 上一次记晚睡的日序
+    # 最近若干次入睡时刻（小时，0~24），供"规律睡眠"算标准差 [R44]。
+    sleep_onsets: list = field(default_factory=list)
+    habit_day: float = -1.0          # 计数器所属日序
+    # 水合基线（7 日 EMA）：判断"脱水"要跟自己的常态比，而不是跟一个
+    # 写死的 42 L 比 —— 本模型的稳态总体水本来就在 40~41 L，写死 42 会让
+    # 正常人天天被判脱水。
+    body_water_ref: float = 0.0
+    # 运动程式（v1.4.0）：cardio 有氧 / strength 力量 / yoga 瑜伽拉伸。
+    # 本模型只有中/高两档运动强度（见 engine 的 EX_* 常数），瑜伽按
+    # 较短时长记在中档 —— 这是近似口径，文档里如实标注。
+    exercise_style: str = ""
 
     def snapshot(self):
         return asdict(self)

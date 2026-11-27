@@ -626,6 +626,120 @@ doi:10.1038/s41380-018-0017-5. PMID 29453413.
 
 ---
 
+## 血液、免疫、营养与生活习惯（2026-11-24 v1.4.0 新增，[R36]-[R65]）
+
+**用途**：为 v1.4.0 的四个新子系统（血液 / 免疫 / 膳食营养结构 / 生活习惯）提供依据。
+以下条目均经 PubMed E-utilities（esearch + esummary）取回真实元数据后写入，
+标题、期刊、卷期页、DOI、PMID 均来自 API 返回，不是凭记忆抄录；
+标「（该条无 DOI，仅有 PMID）」的是 API 确实没返回 DOI 的老文献。
+
+**[R36] Convertino VA.** Blood volume response to physical activity and inactivity. *Am J Med Sci*. 2007 Jul;334(1):72-9. doi:10.1097/MAJ.0b013e318063c6e4 PMID 17630597.
+取用：血容量是可变量（随活动/失活动态调整）这一前提；本模型不建模长期适应。
+
+**[R37] Nadler SB, Hidalgo JH, Bloch T.** Prediction of blood volume in normal human adults. *Surgery*. 1962 Feb;51(2):224-32. doi:（该条无 DOI，仅有 PMID） PMID 21936146.
+取用：成人血容量按体重 60~70 mL/kg 的量级（60 kg 女性约 4.0 L），即 blood.BV_REF_ML 的取值区间。
+
+**[R38] Gutierrez G, Reines HD, Wulf-Gutierrez ME.** Clinical review: hemorrhagic shock. *Crit Care*. 2004 Oct;8(5):373-81. doi:10.1186/cc2851 PMID 15469601.
+取用：失血分级口径：I 级 <15% 血容量不改变生命体征。用于把一次意外出血的上限留在 I 级。
+
+**[R39] Franco RS.** Measurement of red cell lifespan and aging. *Transfus Med Hemother*. 2012 Oct;39(5):302-7. doi:10.1159/000342232 PMID 23801920.
+取用：红细胞寿命约 120 天 → 一阶破坏项的时间常数。
+
+**[R40] Jelkmann W.** Regulation of erythropoietin production. *J Physiol*. 2011 Mar 15;589(Pt 6):1251-8. doi:10.1113/jphysiol.2010.195057 PMID 21078592.
+取用：促红素由肾脏按氧供/血红蛋白水平调控；重度贫血时红细胞产出可提高数倍（模型上限取 6 倍）。
+
+**[R41] Camaschella C.** Iron deficiency. *Blood*. 2019 Jan 3;133(1):30-39. doi:10.1182/blood-2018-05-815944 PMID 30401704.
+取用：缺铁的储备—吸收—贫血链条；铁吸收分数随储备下降而升高。
+
+**[R42] Hallberg L, Högdahl AM, Nilsson L, Rybo G.** Menstrual blood loss--a population study. Variation at different ages and attempts to define normality. *Acta Obstet Gynecol Scand*. 1966;45(3):320-51. doi:10.3109/00016346609158455 PMID 5922481.
+取用：经血量的群体分布（中位约 35 mL，>80 mL 为月经过多），用于每周期经血总量的抽样。
+
+**[R43] Hallberg L, Högdahl AM, Nilsson L, Rybo G.** Menstrual blood loss and iron deficiency. *Acta Med Scand*. 1966 Nov;180(5):639-50. doi:10.1111/j.0954-6820.1966.tb02880.x PMID 5923385.
+取用：经血铁损失 → 铁储备下降 → 缺铁性贫血的因果链。
+
+**[R44] Hallberg L, Rossander-Hultén L.** Iron requirements in menstruating women. *Am J Clin Nutr*. 1991 Dec;54(6):1047-58. doi:10.1093/ajcn/54.6.1047 PMID 1957820.
+取用：行经女性每日需吸收铁约 2 mg（对应膳食铁 18 mg 量级）。
+
+**[R45] Machlus KR, Italiano JE Jr.** The incredible journey: From megakaryocyte development to platelet formation. *J Cell Biol*. 2013 Jun 10;201(6):785-96. doi:10.1083/jcb.201304054 PMID 23751492.
+取用：血小板生成与寿命（约 7~10 天）→ 血小板的一阶回复时间常数。
+
+**[R46] George-Gay B, Parker K.** Understanding the complete blood count with differential. *J Perianesth Nurs*. 2003 Apr;18(2):96-114. doi:10.1053/jpan.2003.50013 PMID 12710004.
+取用：白细胞三分类的参考区间，以及「细菌升中性粒、病毒升淋巴」的应答方向。
+
+**[R47] Gabay C, Kushner I.** Acute-phase proteins and other systemic responses to inflammation. *N Engl J Med*. 1999 Feb 11;340(6):448-54. doi:10.1056/NEJM199902113400607 PMID 9971870.
+取用：急性期反应：IL-6 为主要驱动、CRP 为下游标志物。
+
+**[R48] Mackowiak PA.** Concepts of fever. *Arch Intern Med*. 1998 Sep 28;158(17):1870-81. doi:10.1001/archinte.158.17.1870 PMID 9759682.
+取用：发热是调定点上移（蓄热期寒战、退热期出汗）；常见感染 38~39 ℃ 的量级。
+
+**[R49] Dantzer R, O'Connor JC, Freund GG, Johnson RW, Kelley KW.** From inflammation to sickness and depression: when the immune system subjugates the brain. *Nat Rev Neurosci*. 2008 Jan;9(1):46-56. doi:10.1038/nrn2297 PMID 18073775.
+取用：生病行为三件套（乏力、食欲下降、心境低落）。
+
+**[R50] Webster Marketon JI, Glaser R.** Stress hormones and immune function. *Cell Immunol*. 2008 Mar-Apr;252(1-2):16-26. doi:10.1016/j.cellimm.2007.09.006 PMID 18279846.
+取用：糖皮质激素对免疫功能的抑制 → 「慢性应激 → 免疫张力下降」。
+
+**[R51] Irwin MR.** Why sleep is important for health: a psychoneuroimmunology perspective. *Annu Rev Psychol*. 2015 Jan 3;66:143-72. doi:10.1146/annurev-psych-010213-115205 PMID 25061767.
+取用：睡眠不足 → 炎症升高与抗病毒免疫下降 → 免疫张力项。
+
+**[R52] Simpson RJ, Kunz H, Agha N, Graff R.** Exercise and the Regulation of Immune Functions. *Prog Mol Biol Transl Sci*. 2015;135:355-80. doi:10.1016/bs.pmbts.2015.08.001 PMID 26477922.
+取用：规律中等强度运动提高免疫监视；过量相反，故模型对运动项设上限。
+
+**[R53] Reynolds A, Mann J, Cummings J, Winter N, Mete E, Te Morenga L.** Carbohydrate quality and human health: a series of systematic reviews and meta-analyses. *Lancet*. 2019 Feb 2;393(10170):434-445. doi:10.1016/S0140-6736(18)31809-9 PMID 30638909.
+取用：膳食纤维 25~29 g/天 与全因死亡率下降相关 → 纤维推荐量与评分权重。
+
+**[R54] Krebs-Smith SM, Pannucci TE, Subar AF, Kirkpatrick SI, Lerman JL, Tooze JA, Wilson MM, Reedy J.** Update of the Healthy Eating Index: HEI-2015. *J Acad Nutr Diet*. 2018 Sep;118(9):1591-1602. doi:10.1016/j.jand.2018.05.021 PMID 30146071.
+取用：膳食质量指数的构建思路（对齐推荐量给分、超标扣分）。本模型评分结构参照它，阈值取中国 DRIs。
+
+**[R55] Odegaard AO, Jacobs DR Jr, Steffen LM, Van Horn L, Ludwig DS, Pereira MA.** Breakfast frequency and development of metabolic risk. *Diabetes Care*. 2013 Oct;36(10):3100-6. doi:10.2337/dc13-0316 PMID 23775814.
+取用：进餐频次与代谢风险相关 → 「错过饭点要补吃」这一修正的行为学依据。
+
+**[R56] Biswas A, Oh PI, Faulkner GE, Bajaj RR, Silver MA, Mitchell MS, Alter DA.** Sedentary time and its association with risk for disease incidence, mortality, and hospitalization in adults: a systematic review and meta-analysis. *Ann Intern Med*. 2015 Jan 20;162(2):123-32. doi:10.7326/M14-1651 PMID 25599350.
+取用：久坐与全因死亡/住院风险相关 → 「久坐」这一负向习惯的定义。
+
+**[R57] Goyal M, Singh S, Sibinga EM, Gould NF, Rowland-Seymour A, Sharma R, et al..** Meditation programs for psychological stress and well-being: a systematic review and meta-analysis. *JAMA Intern Med*. 2014 Mar;174(3):357-68. doi:10.1001/jamainternmed.2013.13018 PMID 24395196.
+取用：冥想类干预降低焦虑/压力评分 → 把「冥想/松弛」列为正向习惯。
+
+**[R58] Ross A, Thomas S.** The health benefits of yoga and exercise: a review of comparison studies. *J Altern Complement Med*. 2010 Jan;16(1):3-12. doi:10.1089/acm.2009.0044 PMID 20105062.
+取用：瑜伽在多项指标上与常规运动相当或更优 → 「瑜伽」这一正向习惯。
+
+**[R59] Windred DP, Burns AC, Lane JM, Saxena R, Rutter MK, Cain SW, Phillips AJK.** Sleep regularity is a stronger predictor of mortality risk than sleep duration: A prospective cohort study. *Sleep*. 2024 Jan 11;47(1):zsad253. doi:10.1093/sleep/zsad253 PMID 37738616.
+取用：睡眠规律性（入睡时刻离散度）与健康结局相关 → 「规律睡眠」的标准差判据。
+
+**[R60] Sawka MN, Cheuvront SN, Carter R 3rd.** Human water needs. *Nutr Rev*. 2005 Jun;63(6 Pt 2):S30-9. doi:10.1111/j.1753-4887.2005.tb00152.x PMID 16028570.
+取用：成人每日需水量与「适量饮水」的量级（总水约 2.0 L，其中饮水约 1.5 L）。
+
+**[R61] Gearhardt AN, Corbin WR, Brownell KD.** Food addiction: an examination of the diagnostic criteria for dependence. *J Addict Med*. 2009 Mar;3(1):1-7. doi:10.1097/ADM.0b013e318193c993 PMID 21768996.
+取用：高油高盐高糖食物的「成瘾」判据 → 「垃圾食品成瘾」的定义。
+
+**[R62] Weiss G, Ganz T, Goodnough LT.** Anemia of inflammation. *Blood*. 2019 Jan 3;133(1):40-50. doi:10.1182/blood-2018-06-856500 PMID 30401705.
+取用：炎症 → hepcidin 升高 → 铁被锁在储备、肠道吸收受抑（炎症性贫血）。
+
+**[R63] Liu F, Aulin LBS, Guo T, Krekels EHJ, et al..** Modelling inflammatory biomarker dynamics in a human lipopolysaccharide (LPS) challenge study using delay differential equations. *Br J Clin Pharmacol*. 2022 Dec;88(12):5420-5427. doi:10.1111/bcp.15476 PMID 35921300.
+取用：人体内毒素试验中 IL-6 与 CRP 的时序（CRP 峰值滞后 IL-6 约一天、CRP 半衰期约 19 h）。
+
+**[R64] Nuccio RP, Barnes KA, Carter JM, Baker LB.** Fluid Balance in Team Sport Athletes and the Effect of Hypohydration on Cognitive, Technical, and Physical Performance. *Sports Med*. 2017 Oct;47(10):1951-1982. doi:10.1007/s40279-017-0738-7 PMID 28508338.
+取用：轻度失水即影响体能与认知 → 「脱水」判定的方向性依据（具体阈值是本模型取值）。
+
+**[R65] WHO.** Haemoglobin concentrations for the diagnosis of anaemia and assessment of severity.
+*WHO/NMH/NHD/MNM/11.1*. Geneva: World Health Organization; 2011.
+https://www.who.int/publications/i/item/WHO-NMH-NHD-MNM-11.1
+取用：贫血的血红蛋白分级阈值（成年非孕女性 <120 g/L 为贫血，<90 中度，<60 重度），
+即 body/blood.py 的 anemia_grade()。
+**查阅方式**：页面标题与编号于 2026-11-24 直接抓取核实（HTTP 200）。
+**诚实标注**：本条目是**机构文件**，不是期刊论文；只核对了标题与编号，未逐页核对内文表述。
+
+### 本轮的「估算」标注（如实列出）
+
+| 位置 | 内容 | 状态 |
+|---|---|---|
+| blood.step_plasma | 每升总体水对应血浆 57.1 mL、RAAS/ADH 张力系数 0.06/0.05/0.04 | 由「血浆≈总体水 5.7%」反推量级 + 工程标定 |
+| blood.step_rbc | 骨髓产出对 Hb 偏低的放大斜率（每 30 g/L 放大 3 倍） | 方向来自 [R40]，斜率为工程取值 |
+| blood.step_iron | 基础铁丢失 0.8 mg/天、吸收基准 12%、炎症抑制 60% | 量级取自 [R41][R44][R62]，系数为工程取值 |
+| immune.step_infection | 感染曲线的高斯峰值日（病毒 2.2 天 / 细菌 2.6 天）与宽度 | 形态与临床病程一致，具体数字为工程取值 |
+| immune.step_cytokine | IL-6 时间常数 3 h、CRP 19 h、CRP≈0.8×IL-6 | 时序方向来自 [R47][R63]，比例系数为量级近似 |
+| nutrition.score_for | 评分各项权重（20/15/15/10/15/5/10/5/5） | 结构参照 [R54]，权重是本模型的工程取值 |
+| nutrition.step | 基础代谢用 Mifflin-St Jeor + 活动系数 1.35 | 公式通用，活动系数为估算 |
+| habits.judge | 有氧 150 分钟/周、力量 2 次/周、规律睡眠 SD 45 分钟、放松 10/20 分钟 | 门槛量级有出处（WHO 指南、[R59]），具体数值为工程取值 |
 ## [R36] Harding EC, Franks NP, Wisden W.
 **Sleep and thermoregulation.**
 *Current Opinion in Physiology*. PMC7323637

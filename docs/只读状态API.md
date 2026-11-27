@@ -114,6 +114,27 @@
 > 它解释"两次对话之间情绪不是一条 0 直线"——写入接口**不能**直接改它。
 > 同时 `mood_valence` 的衰减时间常数由 6 分钟放宽到 **20 分钟**（一句话的影响该覆盖几轮对话）。
 
+> **v1.4.0 起**追加 18 个只读字段（原有字段的语义与量纲不变）：
+>
+> | 分组 | 字段 | 单位 / 取值 |
+> |---|---|---|
+> | 血液 | `blood_vol` / `hb` / `hct` | mL / g·L⁻¹ / % |
+> | 血液 | `anemia` | `none` / `mild` / `moderate` / `severe` |
+> | 血液 | `platelet` / `iron_store` | 10⁹·L⁻¹ / mg |
+> | 免疫 | `wbc` / `neut` / `lymph` | 10⁹·L⁻¹ |
+> | 免疫 | `crp` / `infection` / `infection_site` | mg·L⁻¹ / 0~1 / 文本 |
+> | 免疫 | `fever_drive` | ℃（致热驱动，不是体温） |
+> | 营养 | `diet_score` / `diet_flags` | 0~100 / 逗号分隔的标记 |
+> | 身体 | `weight_kg` / `bmi` | kg / —（派生值，不反馈生理） |
+> | 习惯 | `habits` | 字符串数组，如 `["regular_sleep","healthy_diet"]` |
+>
+> 用它们做判断时的注意点：
+> - `fever_drive` 是加到调定点上的偏移量，**体温请看 `temp`**（get_state 不直接回传 temp，
+>   需要体温请用 `webui_now` 或 `webui_blood`）。
+> - `habits` 是判定结果，不代表生理状态本身；且习惯判定按设计**零副作用**，
+>   外部读它做任何事都不会反过来改动身体。
+> - `weight_kg` / `bmi` 由累计能量盈亏派生，只用于"超重/肥胖"判定。
+
 ### 16.7 `adjust_mood(...)` — 写入
 
 身体**没有长期 `mood` 字段**，情绪分三个层次，各自的时间尺度不同：
@@ -149,3 +170,73 @@ adjust_mood(valence=-45, reason="这一句里她在抱怨")          # v1.3.0：
 5. **版本**：返回里带 `version`，以后加字段不改已有字段语义。
 6. **频率**：只读接口建议 30~60 秒一次（调用方可缓存）；`log_drink` 是低频写。
 7. **能力声明**：调用方 `_manifest.json` 必须声明 `api.call`，否则宿主抛 `[E_CAPABILITY_DENIED]`。
+
+---
+
+## 睡眠结构：`webui_now` 的 `sleep` 对象
+
+> 这一节是给前端与二次开发对接用的，不是上面那套给其他插件的公开 API。
+> 字段由 `LifeBodyPlugin._sleep_view()` 产出，遵循「只加字段、不删字段」。
+
+### 一张卡上有三套口径
+
+睡眠卡片同时展示「结构行」「最近一夜」「夜间分期图」，三者**来源不同**，看数据时别把它们当成同一个数：
+
+| 界面位置 | 字段 | 口径 |
+|---|---|---|
+| 浅睡 / 深睡 / REM / 总时长 | `light_h` `deep_h` `rem_h` `total_h` | **最近一次合格 bout**。午睡不计入，永远不会显示午睡时长。 |
+| 最近一夜 / 整夜构成 | `last_night` | **按夜聚合**后的一整夜（同一晚的多段 bout 合并）。 |
+| 夜间分期图 | `bouts` + `history` 采样 | 按 `last_night.start_t`/`end_t` 裁剪真实采样点。 |
+
+### 字段
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `total_h` `light_h` `deep_h` `rem_h` | float | 结构行时长（小时），口径为最近一次合格 bout |
+| `light_pct` `deep_pct` `rem_pct` | float | 上述三段占 `total_h` 的百分比（0~100） |
+| `quality` | float | 睡眠质量评分 0~100（PSQI 成分的 7 日类比，见 `docs/血糖与睡眠文献依据.md`） |
+| `debt_h` | float | 睡眠债（小时） |
+| `stage` / `stage_text` | str | 当前分期 `awake\|light\|deep\|rem` 及中文名 |
+| `sleeping` | bool | 此刻是否睡着 |
+| `bout_active` | bool | 当前是否处在「连续睡眠区间」中（已入睡且未结算） |
+| `cycle_index` / `cycle_pos` | int / float | 本夜第几个 NREM-REM 周期、当前周期进度 0~1 |
+| `last_sleep_hours` | float | 最近一次**合格** bout 的睡眠小时（午睡不写） |
+| `counts_as_night` | bool | 当前口径下的时长是否已达合格夜门槛 |
+| `min_bout_hours` | float | 合格夜门槛（默认 4.0） |
+| `last_night` | obj | 最近一夜的聚合视图，见下 |
+| `week_nights` | int | 近 7 日**合格夜数**（按夜计数，不按 bout 段数） |
+| `week_hours` `week_quality` `week_efficiency` | float | 近 7 日汇总（时长 / 按小时加权评分 / 按小时加权效率） |
+| `week_skipped` | int | 近 7 日被判为午睡而跳过的段数 |
+| `bouts` | list | 最近 7 段合格 bout，元素含 `start_t` `end_t` `hours` `light_h` `deep_h` `rem_h` `quality` `efficiency` `wakes` `cycles` `night_key` |
+| `depth` | float | 睡眠深度 0~1（0 = 清醒，1 = 熟睡） |
+| `awake_h` | float | 当前 bout 内累计清醒小时（计入在床时间，不计入睡眠时长） |
+| `wake_count` | int | 本 bout 被唤醒次数 |
+| `wake_by_message` `wake_by_thirst` `wake_by_bladder` | int | 上述唤醒按原因分类的计数 |
+| `wake_pending` | bool | 是否处于「已判定唤醒、等待生效」的过渡态 |
+| `last_wake_reason` | str | 最近一次唤醒原因（中文短语） |
+| `awake_hours` | float | 连续清醒小时数（强制睡眠判据用） |
+| `forced_sleep` | bool | 是否处于强制睡眠（连续清醒过久，无视作息窗口） |
+| `microsleep_count` | int | 微睡眠次数 |
+
+### `sleep.last_night`
+
+空的或异常的夜一律返回 `{}`，前端各字段按 `—` 显示，无需做 None 判断。
+
+| 字段 | 含义 |
+|---|---|
+| `start_t` `end_t` | 这一夜的起止（仿真秒）。**分期图用它裁剪区间**，否则一次日间小睡会被当成「最近一段睡眠」画进图里 |
+| `hours` | 整夜累计睡眠小时（各段 bout 之和） |
+| `bout_h` | 整夜在床小时（含中途清醒） |
+| `bouts` | 这一夜由几段 bout 合并而成 |
+| `cycles` | 这一夜累计的 NREM-REM 周期数 |
+| `wakes` | 夜内被唤醒次数 |
+| `light_h` `deep_h` `rem_h` | 整夜分期构成 |
+| `quality` `efficiency` | 按小时加权的评分与睡眠效率 |
+
+### 夜归属与午睡判定
+
+- **夜归属看入睡时刻**：同一 `night_key` 的 bout 合并为一夜。取入睡时刻而不是醒来时刻，是为了让「02:45 睡到 12:13」这种晚起仍归前一晚 —— 用醒来时刻会因为它越过正午分界而被劈成两夜。
+- **`night_key` 在结算时固化**：写进 `bout["night_key"]`,之后只读不算。它**不随 `clock_offset` 漂移而改变**（`sync_clock` 同步、重启按墙钟重对齐都会改 `clock_offset`，早期版本因此出现过「两夜并一夜」）。
+- **午睡判定**：`总时长 < min_bout_hours` **且** bout 起点不在夜间窗口（含前后 2 小时余量）→ 记午睡，只累加 `week_skipped`，不写 `sleep_bouts`、不写 `last_sleep_hours`、不结算睡眠债。
+- **存档迁移**：`BodyState.sleep_night_rule < 2` 的旧存档，在 `_restore()` 时会按 `sleep_bouts` 用新规则整体重建一次 nights（幂等），并把标记置为 2。
+

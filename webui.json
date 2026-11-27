@@ -142,6 +142,26 @@
           }
         }
       }
+    },
+    {
+      "id": "vitals",
+      "title": "血液与生活习惯",
+      "description": "血容量与红细胞分账、血红蛋白、铁与血小板、白细胞与炎症、膳食营养结构、16 项生活习惯判定",
+      "placement": "sidebar",
+      "icon": "database",
+      "mode": "custom",
+      "entry": "webui/vitals.html",
+      "layout": "document",
+      "queries": {
+        "blood": {
+          "api": "webui_blood",
+          "version": "1"
+        },
+        "nutrition": {
+          "api": "webui_nutrition",
+          "version": "1"
+        }
+      }
     }
   ]
 }

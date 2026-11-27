@@ -11,6 +11,7 @@ APK 依据：
 """
 from ..base import hormone, register, seat
 from ...state import clamp
+from ...blood import BV_REF_ML
 
 ORGAN = ("heart", "心脏", "心房钠尿肽")
 
@@ -26,7 +27,7 @@ RECEPTORS = {}
 
 def step(s, dt):
     """心房牵张 = 容量偏移 + 压力偏移 + 钠负荷（三者都会拉高心房压）。"""
-    stretch = (clamp((s.blood_vol - 5000.0) / 800.0, 0.0, 1.5)
+    stretch = (clamp((s.blood_vol - BV_REF_ML) / 800.0, 0.0, 1.5)
                + 0.6 * clamp((s.map - 100.0) / 40.0, 0.0, 1.0)
                + 0.4 * clamp((s.na - 140.0) / 10.0, 0.0, 1.0))
     s.anp = seat(s.anp, clamp(0.10 + 0.85 * stretch, 0.02, 2.00), dt, "anp")
